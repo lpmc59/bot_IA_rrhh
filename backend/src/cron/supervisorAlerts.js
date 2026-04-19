@@ -9,6 +9,13 @@ const taskService = require('../services/taskService');
 const NO_CHECKIN_MINUTES = parseInt(process.env.ALERT_NO_CHECKIN_MINUTES || '60');
 const NO_TASK_MINUTES = parseInt(process.env.ALERT_NO_TASK_MINUTES || '60');
 const OVERTIME_FACTOR = parseFloat(process.env.ALERT_OVERTIME_FACTOR || '2');
+// Minutos de gracia después del fin de turno para seguir monitoreando actividad.
+// 0 = no alertar una vez terminado el turno (comportamiento estricto, recomendado).
+// >0 = dejar N minutos extra por si el empleado está cerrando tareas o haciendo wrap-up.
+const SHIFT_END_GRACE_MINUTES = parseInt(process.env.ALERT_SHIFT_END_GRACE_MINUTES || '0');
+// Minutos a esperar después del fin de turno antes de reportar tareas sin cerrar.
+// Da tiempo al empleado a cerrar tareas pendientes antes de molestar al supervisor.
+const OPEN_TASKS_END_GRACE_MINUTES = parseInt(process.env.ALERT_OPEN_TASKS_END_GRACE_MINUTES || '15');
 
 // ─── Cron principal: cada 15 minutos ────────────────────────────────────────
 function startSupervisorAlertsCron() {
@@ -20,7 +27,7 @@ function startSupervisorAlertsCron() {
     }
   });
 
-  logger.info(`Supervisor alerts cron started (no-checkin: ${NO_CHECKIN_MINUTES}m, no-task: ${NO_TASK_MINUTES}m, overtime: ${OVERTIME_FACTOR}x)`);
+  logger.info(`Supervisor alerts cron started (no-checkin: ${NO_CHECKIN_MINUTES}m, no-task: ${NO_TASK_MINUTES}m, shift-end-grace: ${SHIFT_END_GRACE_MINUTES}m, open-tasks-end-grace: ${OPEN_TASKS_END_GRACE_MINUTES}m, overtime: ${OVERTIME_FACTOR}x)`);
 }
 
 async function runAllAlerts() {
@@ -29,6 +36,7 @@ async function runAllAlerts() {
     alertNoCheckin(workDate),
     alertNoTaskInProgress(workDate),
     alertTaskOvertime(workDate),
+    alertOpenTasksAtShiftEnd(workDate),
   ]);
 
   for (const r of results) {
@@ -97,6 +105,9 @@ async function alertNoTaskInProgress(workDate) {
   const res = await query(
     `SELECT e.employee_id, e.full_name,
             c.answered_ts,
+            st.start_time AS shift_start_time,
+            st.end_time   AS shift_end_time,
+            st.shift_code, st.shift_name,
             -- Última actividad registrada hoy (para el mensaje al supervisor)
             (SELECT GREATEST(
                       COALESCE(MAX(ti.last_update_at), 'epoch'::timestamptz),
@@ -115,6 +126,10 @@ async function alertNoTaskInProgress(workDate) {
             sup.role AS supervisor_role
      FROM checkins c
      JOIN employees e ON e.employee_id = c.employee_id
+     -- Solo consideramos empleados con turno asignado hoy.
+     -- Esto permite verificar el end_time del turno y no alertar fuera de horario.
+     JOIN shift_assignments sa ON sa.employee_id = e.employee_id AND sa.work_date = $1
+     JOIN shift_templates    st ON st.shift_id  = sa.shift_id AND st.is_active = true
      LEFT JOIN employees sup ON sup.employee_id = e.supervisor_id
      WHERE c.work_date = $1
        AND c.checkin_type = 'start_day'
@@ -122,6 +137,20 @@ async function alertNoTaskInProgress(workDate) {
        AND e.is_active = true
        -- Check-in fue hace más de N minutos
        AND NOW() > c.answered_ts + ($2 || ' minutes')::interval
+       -- El turno NO ha terminado (con grace opcional). Si el turno ya terminó,
+       -- no tiene sentido alertar "sin tarea en progreso" — el empleado ya salió.
+       -- Turnos que cruzan medianoche (end_time < start_time) se manejan sumando un día.
+       AND NOW() < (
+             CASE
+               WHEN st.end_time <= st.start_time THEN
+                 -- Turno nocturno: end_time es al día siguiente
+                 (CURRENT_DATE + INTERVAL '1 day' + st.end_time
+                    + ($3 || ' minutes')::interval)
+               ELSE
+                 (CURRENT_DATE + st.end_time
+                    + ($3 || ' minutes')::interval)
+             END
+           )
        -- No ha habido actividad de tarea en los últimos N minutos.
        -- "Actividad" = tarea in_progress, o task_instance actualizada/completada recientemente.
        -- Esto evita falsos positivos cuando el empleado termina una rutinaria y tarda
@@ -154,7 +183,7 @@ async function alertNoTaskInProgress(workDate) {
            AND esc.work_date = $1
            AND esc.reason = 'NO_TASK_1H'
        )`,
-    [workDate, NO_TASK_MINUTES]
+    [workDate, NO_TASK_MINUTES, SHIFT_END_GRACE_MINUTES]
   );
 
   for (const emp of res.rows) {
@@ -227,6 +256,114 @@ async function alertTaskOvertime(workDate) {
     }
 
     // Also notify all general supervisors (sin link de formulario)
+    await outboxService.notifyGeneralSupervisors(notifMsg);
+  }
+}
+
+// ─── Alerta 4: Tareas no cerradas al fin de turno ────────────────────────────
+// Empleado cuyo turno ya terminó (+ grace) pero dejó tareas in_progress o blocked.
+// Da visibilidad al supervisor de trabajo inconcluso y permite seguimiento.
+async function alertOpenTasksAtShiftEnd(workDate) {
+  const res = await query(
+    `SELECT e.employee_id, e.full_name,
+            st.start_time AS shift_start_time,
+            st.end_time   AS shift_end_time,
+            st.shift_code, st.shift_name,
+            -- Lista agregada de tareas abiertas (in_progress + blocked)
+            (SELECT json_agg(json_build_object(
+                      'title',            ti.title,
+                      'status',           ti.status,
+                      'started_at',       ti.started_at,
+                      'standard_minutes', ti.standard_minutes,
+                      'progress_percent', ti.progress_percent,
+                      'blocked_reason',   ti.blocked_reason
+                    ) ORDER BY ti.started_at NULLS LAST, ti.display_order)
+             FROM task_instances ti
+             WHERE ti.employee_id = e.employee_id
+               AND ti.work_date = $1
+               AND ti.status IN ('in_progress', 'blocked')) AS open_tasks,
+            sup.employee_id AS supervisor_id, sup.full_name AS supervisor_name,
+            sup.phone_e164 AS supervisor_phone, sup.telegram_id AS supervisor_telegram_id,
+            sup.role AS supervisor_role
+     FROM shift_assignments sa
+     JOIN shift_templates    st ON st.shift_id = sa.shift_id AND st.is_active = true
+     JOIN employees e ON e.employee_id = sa.employee_id
+     LEFT JOIN employees sup ON sup.employee_id = e.supervisor_id
+     WHERE sa.work_date = $1
+       AND e.is_active = true
+       -- El turno YA terminó hace al menos $2 minutos (grace post-turno).
+       -- Soporte para turnos nocturnos (end_time <= start_time → end es al día siguiente).
+       AND NOW() > (
+             CASE
+               WHEN st.end_time <= st.start_time THEN
+                 (CURRENT_DATE + INTERVAL '1 day' + st.end_time
+                    + ($2 || ' minutes')::interval)
+               ELSE
+                 (CURRENT_DATE + st.end_time
+                    + ($2 || ' minutes')::interval)
+             END
+           )
+       -- Tiene al menos una tarea abierta (in_progress o blocked) en su jornada.
+       -- planned NO se considera aquí — esas nunca se iniciaron, es otro problema
+       -- (cubierto por NO_TASK_1H durante el turno).
+       AND EXISTS (
+         SELECT 1 FROM task_instances ti
+         WHERE ti.employee_id = e.employee_id
+           AND ti.work_date = $1
+           AND ti.status IN ('in_progress', 'blocked')
+       )
+       -- Dedup: no re-alertar en el mismo día por el mismo empleado
+       AND NOT EXISTS (
+         SELECT 1 FROM supervisor_escalations esc
+         WHERE esc.employee_id = e.employee_id
+           AND esc.work_date = $1
+           AND esc.reason = 'OPEN_TASKS_SHIFT_END'
+       )`,
+    [workDate, OPEN_TASKS_END_GRACE_MINUTES]
+  );
+
+  for (const emp of res.rows) {
+    const endHHMM = String(emp.shift_end_time).substring(0, 5);
+    const openTasks = Array.isArray(emp.open_tasks) ? emp.open_tasks : [];
+    const inProgress = openTasks.filter(t => t.status === 'in_progress');
+    const blocked    = openTasks.filter(t => t.status === 'blocked');
+
+    // Construir listado de tareas para el mensaje
+    let taskList = '';
+    if (inProgress.length > 0) {
+      taskList += `\n\n🔄 *En progreso (${inProgress.length}):*`;
+      for (const t of inProgress) {
+        const startStr = t.started_at
+          ? new Date(t.started_at).toLocaleTimeString('es-GT', { hour: '2-digit', minute: '2-digit', hour12: false })
+          : '--';
+        const pct = t.progress_percent != null ? ` · ${t.progress_percent}%` : '';
+        const std = t.standard_minutes ? ` · std ${t.standard_minutes}m` : '';
+        taskList += `\n  • ${t.title} (inicio ${startStr}${std}${pct})`;
+      }
+    }
+    if (blocked.length > 0) {
+      taskList += `\n\n🚫 *Bloqueadas (${blocked.length}):*`;
+      for (const t of blocked) {
+        const reason = t.blocked_reason ? ` — ${t.blocked_reason}` : '';
+        taskList += `\n  • ${t.title}${reason}`;
+      }
+    }
+
+    const notifMsg = `📋 *Tareas no cerradas al fin de turno*\nEmpleado: ${emp.full_name}\nTurno: ${emp.shift_code || emp.shift_name} (fin: ${endHHMM})\nDejó ${openTasks.length} tarea${openTasks.length > 1 ? 's' : ''} sin cerrar.${taskList}`;
+
+    const formLink = await insertEscalation(emp.employee_id, emp.supervisor_id, workDate, 'OPEN_TASKS_SHIFT_END', notifMsg, emp.supervisor_role);
+
+    if (emp.supervisor_telegram_id || emp.supervisor_phone) {
+      await outboxService.queueMessage(emp.supervisor_telegram_id || emp.supervisor_phone, notifMsg + formLink);
+      logger.info('Alert OPEN_TASKS_SHIFT_END sent', {
+        employee: emp.full_name,
+        shift: emp.shift_code,
+        inProgress: inProgress.length,
+        blocked: blocked.length,
+      });
+    }
+
+    // También notificar a supervisores generales (sin link de formulario)
     await outboxService.notifyGeneralSupervisors(notifMsg);
   }
 }
