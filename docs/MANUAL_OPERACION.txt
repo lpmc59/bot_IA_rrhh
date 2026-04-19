@@ -1,0 +1,200 @@
+MANUAL OPERACION =TALINDA BOT+
+
+Este sistema usa todo lo configurado en gestion.talinda.es  (o sea el app talinda_admin_cs)
+
+1. Guia tecnica
+2. Guia de resolucion de problemas cuando usan diferente cuenta de Telegram
+
+1.GUIA TECNICA
+==============
+Tiene tres modulos:
+a. Un Backend que escucha en el puerto 4000
+b. OpenClaw Gateway que usa su propio puerto
+
+c. DOCKER:	NGINX y POSTGRES
+
+======================================================
+NOTA RAPIDA:
+sudo systemctl restart talinda-bot-backend.service
+sudo systemctl restart openclaw-gateway
+OpenClaw tiene autoarranque no es con start
+
+Diagnostico rapido:
+systemctl status openclaw-gateway
+journalctl -u openclaw-gateway -n 100
+ps aux | grep openclaw
+ss -tulpn | grep 4000
+======================================================
+Nota:
+en .env estan parametros de vencimiento de los token
+ESCALATION_TOKEN_EXPIRY_HOURS=12
+
+
+BACKEND:
+RUTA:		/home/admin/projects/talinda_bot
+		/home/admin/projects/talinda_bot/backend
+
+Donde esta corriendo:
+sudo systemctl list-units --type=service | grep -i -E 'talinda|backend|dart'
+
+Salida esperada:
+  talinda-admin-backend.service                         loaded active running Talinda Admin CS FastAPI Backend
+  talinda-bot-backend.service                           loaded active running Talinda Bot Backend
+  talinda-finanzas-backend.service                      loaded active running Talinda Finanzas Backend Dart
+
+Reiniciar despues de cambios:
+
+sudo systemctl restart talinda-bot-backend.service
+
+Logs en tiempo real:
+sudo journalctl -u talinda-bot-backend.service -f
+
+
+
+OPENCLAW
+
+1. Ver estatus
+sudo systemctl status openclaw-gateway --no-pager
+pgrep -a -f openclaw-gateway
+ss -tulpn | grep 4000
+
+Salida esperada:
+tcp   LISTEN 0      511                  127.0.0.1:4000      0.0.0.0:*    users:(("openclaw-gatewa",pid=951,fd=22))   
+tcp   LISTEN 0      511                      [::1]:4000         [::]:*    users:(("openclaw-gatewa",pid=951,fd=23))   
+
+RESULTADO: un solo pid esta OK
+
+2. Modos de operacion
+
+DETENER:
+sudo systemctl disable openclaw-gateway
+sudo systemctl stop openclaw-gateway
+
+ARRANQUE LUEGO DE DETENER:
+sudo systemctl start openclaw-gateway
+systemctl status openclaw-gateway
+
+AUTO-ARRANQUE = NO se necesita arranque manual, esto duplica los procesos y da problema.
+sudo systemctl enable openclaw-gateway
+systemctl is-enabled openclaw-gateway
+
+
+LOGS EN TIEMPO REAL:
+journalctl -u openclaw-gateway -f
+ss -tulpn | grep 4000
+
+
+3. PARAR EL GATEWAY (no usar kill)
+openclaw gateway stop
+
+Verificar:
+pgrep -af openclaw
+ss -tulpn | grep 4000
+
+Activar systemd
+sudo systemctl enable openclaw-gateway
+sudo systemctl reset-failed openclaw-gateway
+sudo systemctl start openclaw-gateway
+
+Verificar systemd OK:
+sudo systemctl status openclaw-gateway --no-pager
+pgrep -a -f openclaw-gateway
+ss -tulpn | grep 4000
+
+
+
+
+
+
+POSTGRES:
+docker exec -it shared_postgres psql -U postgres -d talindadb
+
+# Busca el nombre del contenedor
+docker ps | grep postgres
+
+# Cambia timezone
+docker exec -it shared_postgres psql -U talindadb_app -d talindadb -c "SHOW timezone;"
+
+# Si no es Europe/Madrid:
+docker exec -it shared_postgres psql -U postgres -d talindadb -c "ALTER SYSTEM SET timezone = 'Europe/Madrid';"
+docker restart shared_postgres
+
+===================================================================================================================
+2.GUIA DE SOLUCION DE PROBLEMAS DE TELEGRAM
+Cuando un empleado usa una cuenta de Telegram que ya registro en otro telefono le dira que no lo tiene registrado.
+
+Eso te sacará los números que están llegando al webhook.
+
+sudo journalctl -u talinda-bot-backend --since "24 hours ago" \
+| grep "Webhook received" \
+| grep -oE '"from":"[0-9]+"' \
+| cut -d':' -f2 \
+| tr -d '"'
+
+Para contarlos y ver repetidos
+
+sudo journalctl -u talinda-bot-backend --since "24 hours ago" \
+| grep "Webhook received" \
+| grep -oE '"from":"[0-9]+"' \
+| cut -d':' -f2 \
+| tr -d '"' \
+| sort | uniq -c | sort -nr
+
+
+Resultado:
+     70 8684820190
+     43 2098596972
+     34 1008343934
+     27 5825850746
+     23 1399905876
+     10 8759559994
+      4 7585869174
+
+Si quieres ver solo números de intentos no registrados
+Como no siempre ves el mensaje de respuesta en los logs, una forma práctica es:
+1. Extraer números que escribieron
+
+sudo journalctl -u talinda-bot-backend --since "24 hours ago" \
+| grep "Webhook received" \
+| grep -oE '"from":"[0-9]+"' \
+| cut -d':' -f2 \
+| tr -d '"' \
+| sort -u
+
+ Buscar exactamente alrededor de esa hora
+
+Si 13:38 es hora del servidor
+sudo journalctl -u talinda-bot-backend --since "2026-04-09 13:35:00" --until "2026-04-09 13:41:00"
+Filtrar solo el webhook
+sudo journalctl -u talinda-bot-backend   --since "2026-04-09 10:35:00"   --until "2026-04-09 12:41:00" | grep "Webhook received"
+
+Opción más segura, recomendada para coregir el problema:
+
+UPDATE app.employees
+SET openclaw_user_id = '7585869174',
+    updated_at = NOW()
+WHERE employee_id = '7b405d5e-b2a2-4c7b-8667-753aaf141d1e';
+
+
+Hazlo dentro de transacción y verificando antes y después:
+BEGIN;
+
+SELECT employee_id, full_name, phone_e164, openclaw_user_id
+FROM app.employees
+WHERE employee_id = '7b405d5e-b2a2-4c7b-8667-753aaf141d1e'
+FOR UPDATE;
+
+UPDATE app.employees
+SET openclaw_user_id = '7585869174',
+    updated_at = NOW()
+WHERE employee_id = '7b405d5e-b2a2-4c7b-8667-753aaf141d1e';
+
+SELECT employee_id, full_name, phone_e164, openclaw_user_id, updated_at
+FROM app.employees
+WHERE employee_id = '7b405d5e-b2a2-4c7b-8667-753aaf141d1e';
+
+COMMIT;
+
+
+
+

@@ -1,0 +1,140 @@
+Empleado: "me reporto"
+  ↓ (CHECK_IN intent)
+shouldRequireLocation(employee) → true (employee.require_location_check=true + feature on)
+  ↓
+Bot: "📍 antes de registrar tu entrada necesito que compartas tu ubicación..."
+     [sesión = WAITING_LOCATION, payload={checkType:'start_day', shiftId, ...}]
+  ↓
+Empleado: [📎 → Ubicación → Compartir mi ubicación actual]
+  ↓ (event 'location' llega vía slow path)
+webhook.extractLocationFromPayload() → {latitude, longitude, accuracy_m}
+  ↓
+processInboundMessage({locationPayload})
+  ↓
+handleLocationPayload(): valida contra resolveAuthorizedLocation()
+  ├→ employee.work_location_id → app.work_locations  (resolved_from='employee')
+  └→ .env defaults                                     (resolved_from='env_default')
+  ↓
+locationService.validateLocation() → {status, distance_m, valid, authorized}
+  ↓
+completeCheckIn(employee, workDate, shift, locationInfo)
+  ├→ checkinService.registerCheckIn()  ← persiste TODO en checkins
+  ├→ formatLocationFeedback() en mensaje al empleado
+  └→ maybeEscalateLocationAnomaly() si status != valid → escalateToSupervisor()
+
+
+.env
+# ── CHECKIN/CHECKOUT con LOCALIZACION ───────────────────────────────
+LOCATION_CHECK_ENABLED=false
+LOCATION_DEFAULT_LAT=39.951854645213906
+LOCATION_DEFAULT_LNG=-3.9928752486100345
+LOCATION_DEFAULT_RADIUS_M=150
+
+
+Estados de validación persistidos en checkins.location_status
+
+Status		Cuándo							¿Escala?
+─────────────────────────────────────────────────────────────────────────────────────────────────────
+not_required	Feature off, o require_location_check=false		No
+valid		Compartió + dentro del radio				No
+out_of_range	Compartió + fuera del radio				Sí → CHECKIN_LOCATION_INVALID
+not_shared	No compartió (cualquier texto en vez de ubicación)	Sí → CHECKIN_NO_LOCATION
+low_accuracy	Compartió pero accuracy_m > radius_m			Sí → CHECKIN_LOCATION_INVALID
+
+
+Mensaje de escalonamiento al supervisor
+Para out_of_range incluye link a Google Maps con las coordenadas exactas:
+📍 Check-in fuera de rango
+Empleado: Juan Pérez
+Distancia: 412 m (máximo 150 m)
+Coordenadas: 14.591234, -90.513456
+Google Maps: https://maps.google.com/?q=14.591234,-90.513456
+
+Si el supervisor es supervisor_auditor, automáticamente recibe también el link al formulario móvil de seguimiento (sistema existente).
+
+Decisiones de diseño aplicadas
+==============================
+=> Anomalías no bloquean: el check-in/out se completa siempre, con location_status apropiado y escalonamiento.
+=> work_locations central: empleado solo guarda FK work_location_id. Cambiar el radio de la sucursal es UPDATE en una sola fila.
+=> accuracy_m se respeta: si el GPS reporta peor precisión que el radio, marcamos low_accuracy para no penalizar al empleado por mala señal — pero igual escala (revisión humana).
+=> Snapshot inmutable: en checkins guardamos lat/lng/distance_m/accuracy_m/resolved_from en el momento del registro. Si después cambias el radio en work_locations, los registros viejos quedan intactos para auditoría.
+=> Cron auto-checkout no requiere ubicación: solo el cierre manual del empleado pasa por la validación.
+=> Cancelación inteligente: si el empleado escribe "cancelar"/"no" estando en WAITING_LOCATION, no se cancela — se interpreta como negativa a compartir y se procesa con not_shared.
+
+
+GESTION DEBE HACER:
+==================
+
+-- 1. Crear la(s) ubicación(es)
+
+INSERT INTO app.work_locations (name, latitude, longitude, radius_m, description)
+VALUES ('Centro Comercial Principal', 39.951854645213906, -3.9928752486100345, 200, 'Centro Comercial PdT');
+
+-- 2. Activar empleados (asignarles ubicación + flag)
+
+UPDATE app.employees
+SET require_location_check = true,
+    work_location_id = 'uuid-de-la-ubicacion'
+WHERE employee_id IN (...);
+
+
+
+Por qué tener ambos niveles
+Pregunta	Dónde se responde
+"¿A Juan le vamos a pedir ubicación mañana?"	employees.require_location_check
+"¿El check-in del lunes 8 de abril de Juan tuvo validación?"	checkins.location_status
+"¿Cuántos empleados tienen la validación activa?"	SELECT COUNT(*) FROM employees WHERE require_location_check=true
+"¿Cuántos check-ins de hoy quedaron sin validación por política?"	SELECT COUNT(*) FROM checkins WHERE work_date=CURRENT_DATE AND location_status='not_required'
+Sin el snapshot en checkins, si mañana cambias require_location_check de false a true para un empleado, perderías la información de qué check-ins pasados fueron hechos sin validación. El snapshot preserva la historia inmutable para auditoría.
+
+┌─────────────────────────┐           ┌─────────────────────────────┐
+│    app.employees        │           │      app.checkins           │
+│                         │           │  (un registro por reporte)  │
+│  employee_id            │           │                             │
+│  require_location_check │──decide──▶│  location_required          │
+│  work_location_id       │──decide──▶│  location_resolved_from     │
+│                         │           │  location_status ◀── aquí   │
+│  (CONFIGURACIÓN)        │           │  (EVIDENCIA HISTÓRICA)      │
+└─────────────────────────┘           └─────────────────────────────┘
+
+
+campo require_location que puede tener true/false
+ADD COLUMN IF NOT EXISTS require_location_check boolean NOT NULL DEFAULT false,
+
+ADD COLUMN IF NOT EXISTS location_status     text          -- status unificado
+    CHECK (location_status IN (
+      'not_required',
+      'valid',
+      'out_of_range',
+      'not_shared',
+      'low_accuracy'
+
+CREATE INDEX IF NOT EXISTS idx_checkins_location_anomaly
+  ON app.checkins (work_date, location_status)
+  WHERE location_status IN ('out_of_range', 'not_shared', 'low_accuracy');
+
+Con este índice, una consulta tipo "dame todas las anomalías de hoy" es instantánea:
+SELECT * FROM app.checkins
+WHERE work_date = CURRENT_DATE
+  AND location_status IN ('out_of_range', 'not_shared', 'low_accuracy');
+
+
+Ejemplos de consultas que aprovechan cada forma
+Usando el status (reportes agrupados):
+
+SELECT location_status, COUNT(*)
+FROM app.checkins
+WHERE work_date = CURRENT_DATE
+GROUP BY location_status;
+
+Usando los booleanos (métricas simples):
+
+SELECT
+  COUNT(*) FILTER (WHERE location_shared = true)  AS compartieron,
+  COUNT(*) FILTER (WHERE location_valid  = true)  AS validas,
+  COUNT(*) FILTER (WHERE location_shared = false) AS no_compartieron
+FROM app.checkins
+WHERE work_date = CURRENT_DATE;
+
+
+

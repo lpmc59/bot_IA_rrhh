@@ -1,0 +1,11 @@
+{
+  "skills": {
+    "talinda-tasks": {
+      "enabled": true,
+      "path": "/home/admin/.openclaw/skills/talinda-tasks",
+      "env": {
+        "TALINDA_BACKEND_URL": "http://localhost:3000"
+      }
+    }
+  }
+}

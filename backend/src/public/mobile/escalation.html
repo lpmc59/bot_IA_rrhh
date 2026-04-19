@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Seguimiento Escalamiento - TALINDA</title>
+<style>
+  :root { --primary: #1a73e8; --success: #34a853; --danger: #ea4335; --warning: #f9ab00; --bg: #f5f5f5; --card: #fff; --text: #202124; --muted: #5f6368; --border: #dadce0; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+  .container { max-width: 480px; margin: 0 auto; padding: 16px; }
+
+  .header { background: var(--primary); color: #fff; padding: 20px 16px; text-align: center; }
+  .header h1 { font-size: 18px; font-weight: 600; }
+  .header .subtitle { font-size: 13px; opacity: 0.85; margin-top: 4px; }
+
+  .card { background: var(--card); border-radius: 12px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+  .card-title { font-size: 14px; font-weight: 600; color: var(--muted); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+  .info-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f0f0f0; font-size: 14px; }
+  .info-row:last-child { border-bottom: none; }
+  .info-label { color: var(--muted); font-weight: 500; }
+  .info-value { font-weight: 600; text-align: right; max-width: 60%; }
+
+  .escalation-text { background: #fef7e0; border-left: 4px solid var(--warning); padding: 12px; border-radius: 0 8px 8px 0; font-size: 14px; line-height: 1.5; margin-top: 8px; white-space: pre-wrap; }
+
+  label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: var(--text); }
+
+  textarea {
+    width: 100%; padding: 12px; border: 1.5px solid var(--border); border-radius: 8px;
+    font-size: 16px; font-family: inherit; background: #fff; color: var(--text);
+    -webkit-appearance: none; appearance: none; transition: border-color 0.2s;
+    resize: vertical; min-height: 80px;
+  }
+  textarea:focus { outline: none; border-color: var(--primary); }
+
+  .field { margin-bottom: 16px; }
+
+  .toggle-group { display: flex; gap: 8px; }
+  .toggle-option {
+    flex: 1; padding: 14px 8px; border: 2px solid var(--border); border-radius: 10px;
+    text-align: center; cursor: pointer; font-size: 15px; font-weight: 500;
+    transition: all 0.2s; background: #fff; -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  .toggle-option.selected { border-color: var(--primary); background: #e8f0fe; color: var(--primary); }
+  .toggle-option.selected-success { border-color: var(--success); background: #e6f4ea; color: var(--success); }
+  .toggle-option.selected-warning { border-color: var(--warning); background: #fef7e0; color: #b06d00; }
+  .toggle-option.selected-danger { border-color: var(--danger); background: #fce8e6; color: var(--danger); }
+
+  .btn {
+    width: 100%; padding: 16px; border: none; border-radius: 10px; font-size: 16px;
+    font-weight: 600; cursor: pointer; transition: all 0.2s; font-family: inherit;
+    -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+  }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-primary:disabled { background: #94bef7; cursor: not-allowed; }
+  .btn-success { background: var(--success); color: #fff; margin-top: 8px; }
+
+  .loading { text-align: center; padding: 60px 20px; color: var(--muted); font-size: 16px; }
+  .spinner { display: inline-block; width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 12px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .error-page { text-align: center; padding: 60px 20px; }
+  .error-page h2 { color: var(--danger); margin-bottom: 8px; }
+
+  .success-page { text-align: center; padding: 40px 20px; }
+  .success-icon { font-size: 48px; margin-bottom: 12px; }
+  .success-page h2 { color: var(--success); margin-bottom: 8px; }
+
+  .resolved-badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 13px; font-weight: 600; }
+  .resolved-si { background: #e6f4ea; color: var(--success); }
+  .resolved-no { background: #fce8e6; color: var(--danger); }
+  .resolved-pendiente { background: #fef7e0; color: #b06d00; }
+
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Seguimiento de Escalamiento</h1>
+  <div class="subtitle" id="headerSubtitle">Cargando...</div>
+</div>
+
+<div class="container">
+  <!-- Loading -->
+  <div id="loadingView" class="loading">
+    <div class="spinner"></div>
+    <div>Cargando datos...</div>
+  </div>
+
+  <!-- Error -->
+  <div id="errorView" class="error-page hidden">
+    <h2 id="errorTitle">Error</h2>
+    <p id="errorMsg">No se pudo cargar el escalamiento.</p>
+  </div>
+
+  <!-- Main Form -->
+  <div id="formView" class="hidden">
+
+    <!-- Info Card -->
+    <div class="card">
+      <div class="card-title">Informacion del escalamiento</div>
+      <div class="info-row">
+        <span class="info-label">Empleado</span>
+        <span class="info-value" id="infoEmployee">-</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Motivo</span>
+        <span class="info-value" id="infoReason">-</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Fecha</span>
+        <span class="info-value" id="infoDate">-</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Hora</span>
+        <span class="info-value" id="infoTime">-</span>
+      </div>
+      <div class="escalation-text" id="infoText"></div>
+    </div>
+
+    <!-- Form Card -->
+    <div class="card">
+      <div class="card-title">Formulario de seguimiento</div>
+
+      <div class="field">
+        <label>Contacto al empleado</label>
+        <div class="toggle-group" id="contactoToggle">
+          <div class="toggle-option" data-value="true" onclick="selectToggle('contacto', true, this)">Si</div>
+          <div class="toggle-option" data-value="false" onclick="selectToggle('contacto', false, this)">No</div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Instrucciones dadas</label>
+        <textarea id="instrucciones" placeholder="Describe las instrucciones dadas al empleado..." rows="3"></textarea>
+      </div>
+
+      <div class="field">
+        <label>Nota adicional</label>
+        <textarea id="nota" placeholder="Observaciones adicionales (opcional)..." rows="2"></textarea>
+      </div>
+
+      <div class="field">
+        <label>Resuelto</label>
+        <div class="toggle-group" id="resueltoToggle">
+          <div class="toggle-option" data-value="si" onclick="selectResuelto('si', this)">Si</div>
+          <div class="toggle-option" data-value="no" onclick="selectResuelto('no', this)">No</div>
+          <div class="toggle-option" data-value="pendiente" onclick="selectResuelto('pendiente', this)">Pendiente</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Actions -->
+    <button class="btn btn-primary" id="btnSave" onclick="saveForm()">Guardar</button>
+  </div>
+
+  <!-- Success -->
+  <div id="successView" class="success-page hidden">
+    <div class="success-icon">&#10003;</div>
+    <h2>Guardado correctamente</h2>
+    <p id="successMsg">El formulario de seguimiento ha sido registrado.</p>
+    <button class="btn btn-primary" style="margin-top:20px" onclick="location.reload()">Volver al formulario</button>
+  </div>
+</div>
+
+<script>
+const TOKEN = location.pathname.split('/').pop();
+const API = `/api/m/escalation/${TOKEN}`;
+
+let formData = {
+  contacto_empleado: null,
+  instrucciones_dadas: '',
+  nota_adicional: '',
+  resuelto: 'pendiente',
+};
+
+const REASON_LABELS = {
+  'BLOCKER_REPORTED': 'Bloqueo reportado',
+  'FAST_COMPLETION': 'Completada rapidamente',
+  'NO_TIME_LOG': 'Sin registro de tiempo',
+  'POST_CHECKOUT_ACTION': 'Accion post-checkout',
+  'NO_CHECKIN_1H': 'Sin check-in (+1h)',
+  'NO_TASK_1H': 'Sin tarea activa (+1h)',
+  'TASK_OVERTIME': 'Tarea excede tiempo',
+  'BLOCKER_RESOLVED': 'Bloqueo resuelto',
+};
+
+async function loadData() {
+  try {
+    const res = await fetch(API);
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'Token invalido');
+
+    const e = json.escalation;
+
+    document.getElementById('headerSubtitle').textContent = e.supervisor_name;
+    document.getElementById('infoEmployee').textContent = e.employee_name;
+    document.getElementById('infoReason').textContent = REASON_LABELS[e.reason] || e.reason;
+    document.getElementById('infoDate').textContent = new Date(e.work_date).toLocaleDateString('es-ES');
+    document.getElementById('infoTime').textContent = new Date(e.created_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+    document.getElementById('infoText').textContent = e.inbound_text || '(sin detalle)';
+
+    // Restore saved values
+    if (e.contacto_empleado != null) {
+      formData.contacto_empleado = e.contacto_empleado;
+      selectToggleByValue('contacto', e.contacto_empleado);
+    }
+    if (e.instrucciones_dadas) {
+      formData.instrucciones_dadas = e.instrucciones_dadas;
+      document.getElementById('instrucciones').value = e.instrucciones_dadas;
+    }
+    if (e.nota_adicional) {
+      formData.nota_adicional = e.nota_adicional;
+      document.getElementById('nota').value = e.nota_adicional;
+    }
+    if (e.resuelto) {
+      formData.resuelto = e.resuelto;
+      selectResueltoByValue(e.resuelto);
+    }
+
+    document.getElementById('loadingView').classList.add('hidden');
+    document.getElementById('formView').classList.remove('hidden');
+  } catch (err) {
+    document.getElementById('loadingView').classList.add('hidden');
+    document.getElementById('errorView').classList.remove('hidden');
+    document.getElementById('errorMsg').textContent = err.message;
+  }
+}
+
+function selectToggle(field, value, el) {
+  const parent = el.parentElement;
+  parent.querySelectorAll('.toggle-option').forEach(o => o.classList.remove('selected'));
+  el.classList.add('selected');
+  formData.contacto_empleado = value;
+}
+
+function selectToggleByValue(field, value) {
+  const parent = document.getElementById('contactoToggle');
+  parent.querySelectorAll('.toggle-option').forEach(o => {
+    o.classList.remove('selected');
+    if (o.dataset.value === String(value)) o.classList.add('selected');
+  });
+}
+
+function selectResuelto(value, el) {
+  const parent = el.parentElement;
+  parent.querySelectorAll('.toggle-option').forEach(o => {
+    o.classList.remove('selected', 'selected-success', 'selected-warning', 'selected-danger');
+  });
+  const cls = value === 'si' ? 'selected-success' : value === 'no' ? 'selected-danger' : 'selected-warning';
+  el.classList.add(cls);
+  formData.resuelto = value;
+}
+
+function selectResueltoByValue(value) {
+  const parent = document.getElementById('resueltoToggle');
+  parent.querySelectorAll('.toggle-option').forEach(o => {
+    o.classList.remove('selected', 'selected-success', 'selected-warning', 'selected-danger');
+    if (o.dataset.value === value) {
+      const cls = value === 'si' ? 'selected-success' : value === 'no' ? 'selected-danger' : 'selected-warning';
+      o.classList.add(cls);
+    }
+  });
+}
+
+async function saveForm() {
+  const btn = document.getElementById('btnSave');
+  btn.disabled = true;
+  btn.textContent = 'Guardando...';
+
+  try {
+    formData.instrucciones_dadas = document.getElementById('instrucciones').value.trim();
+    formData.nota_adicional = document.getElementById('nota').value.trim();
+
+    const res = await fetch(API, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(formData),
+    });
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'Error al guardar');
+
+    document.getElementById('formView').classList.add('hidden');
+    document.getElementById('successView').classList.remove('hidden');
+
+    if (formData.resuelto === 'si') {
+      document.getElementById('successMsg').textContent = 'Escalamiento marcado como RESUELTO. Gracias.';
+    }
+  } catch (err) {
+    alert('Error: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Guardar';
+  }
+}
+
+loadData();
+</script>
+</body>
+</html>

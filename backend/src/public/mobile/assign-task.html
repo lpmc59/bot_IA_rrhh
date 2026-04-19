@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Asignar Tarea - TALINDA</title>
+<style>
+  :root { --primary: #1a73e8; --success: #34a853; --danger: #ea4335; --warning: #f9ab00; --bg: #f5f5f5; --card: #fff; --text: #202124; --muted: #5f6368; --border: #dadce0; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+  .container { max-width: 480px; margin: 0 auto; padding: 16px; }
+
+  .header { background: var(--primary); color: #fff; padding: 20px 16px; text-align: center; }
+  .header h1 { font-size: 18px; font-weight: 600; }
+  .header .subtitle { font-size: 13px; opacity: 0.85; margin-top: 4px; }
+
+  .card { background: var(--card); border-radius: 12px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+  .card-title { font-size: 14px; font-weight: 600; color: var(--muted); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+  label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: var(--text); }
+  label .required { color: var(--danger); }
+
+  input[type="text"], input[type="number"], textarea, select {
+    width: 100%; padding: 12px; border: 1.5px solid var(--border); border-radius: 8px;
+    font-size: 16px; font-family: inherit; background: #fff; color: var(--text);
+    -webkit-appearance: none; appearance: none; transition: border-color 0.2s;
+  }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--primary); }
+  textarea { resize: vertical; min-height: 80px; }
+
+  .field { margin-bottom: 16px; }
+
+  .autocomplete-wrapper { position: relative; }
+  .autocomplete-wrapper input { padding-right: 36px; }
+  .autocomplete-list {
+    position: absolute; top: 100%; left: 0; right: 0; z-index: 10;
+    background: #fff; border: 1px solid var(--border); border-radius: 0 0 8px 8px;
+    max-height: 200px; overflow-y: auto; display: none; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  }
+  .autocomplete-list.visible { display: block; }
+  .autocomplete-item {
+    padding: 10px 12px; cursor: pointer; font-size: 15px; border-bottom: 1px solid #f0f0f0;
+  }
+  .autocomplete-item:active, .autocomplete-item.highlighted { background: #e8f0fe; }
+  .autocomplete-item:last-child { border-bottom: none; }
+
+  .date-toggle { display: flex; gap: 8px; }
+  .date-option {
+    flex: 1; padding: 14px 8px; border: 2px solid var(--border); border-radius: 10px;
+    text-align: center; cursor: pointer; font-size: 15px; font-weight: 500;
+    transition: all 0.2s; background: #fff; -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  .date-option.selected { border-color: var(--primary); background: #e8f0fe; color: var(--primary); }
+  .date-option .day { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .date-option.selected .day { color: var(--primary); }
+
+  .btn {
+    width: 100%; padding: 16px; border: none; border-radius: 10px; font-size: 16px;
+    font-weight: 600; cursor: pointer; transition: all 0.2s; font-family: inherit;
+    -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+  }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-primary:disabled { background: #94bef7; cursor: not-allowed; }
+
+  .loading { text-align: center; padding: 60px 20px; color: var(--muted); font-size: 16px; }
+  .spinner { display: inline-block; width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 12px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .error-page { text-align: center; padding: 60px 20px; }
+  .error-page h2 { color: var(--danger); margin-bottom: 8px; }
+
+  .success-page { text-align: center; padding: 40px 20px; }
+  .success-icon { font-size: 48px; margin-bottom: 12px; }
+  .success-page h2 { color: var(--success); margin-bottom: 8px; }
+  .warning-box { background: #fef7e0; border: 1px solid var(--warning); border-radius: 8px; padding: 12px; margin-top: 16px; text-align: left; font-size: 14px; }
+  .warning-box .icon { margin-right: 6px; }
+
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Asignar Tarea</h1>
+  <div class="subtitle" id="supervisorName"></div>
+</div>
+
+<div class="container">
+  <!-- Loading -->
+  <div id="loadingView" class="loading">
+    <div class="spinner"></div>
+    <div>Cargando formulario...</div>
+  </div>
+
+  <!-- Error -->
+  <div id="errorView" class="error-page hidden">
+    <h2>Enlace no válido</h2>
+    <p id="errorMsg">El enlace ha expirado o ya fue utilizado.</p>
+  </div>
+
+  <!-- Form -->
+  <div id="formView" class="hidden">
+    <div class="card">
+      <div class="card-title">Datos de la Tarea</div>
+
+      <div class="field">
+        <label>Título <span class="required">*</span></label>
+        <input type="text" id="title" placeholder="Ej: Limpieza de entrada principal" autocomplete="off">
+      </div>
+
+      <div class="field">
+        <label>Descripción</label>
+        <textarea id="description" placeholder="Detalles adicionales (opcional)"></textarea>
+      </div>
+
+      <div class="field">
+        <label>Empleado <span class="required">*</span></label>
+        <div class="autocomplete-wrapper">
+          <input type="text" id="employeeInput" placeholder="Escribe para buscar..." autocomplete="off">
+          <div class="autocomplete-list" id="employeeList"></div>
+        </div>
+        <input type="hidden" id="employeeId">
+      </div>
+
+      <div class="field">
+        <label>Proyecto</label>
+        <div class="autocomplete-wrapper">
+          <input type="text" id="projectInput" placeholder="Opcional" autocomplete="off">
+          <div class="autocomplete-list" id="projectList"></div>
+        </div>
+        <input type="hidden" id="projectId">
+      </div>
+
+      <div class="field">
+        <label>Equipo</label>
+        <div class="autocomplete-wrapper">
+          <input type="text" id="teamInput" placeholder="Opcional" autocomplete="off">
+          <div class="autocomplete-list" id="teamList"></div>
+        </div>
+        <input type="hidden" id="teamId">
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Detalles</div>
+
+      <div class="field">
+        <label>Prioridad</label>
+        <select id="priority">
+          <option value="1">Baja</option>
+          <option value="3" selected>Normal</option>
+          <option value="4">Alta</option>
+          <option value="5">Urgente</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label>Minutos planificados</label>
+        <input type="number" id="plannedMinutes" value="30" min="5" max="480" step="5">
+      </div>
+
+      <div class="field">
+        <label>Fecha de ejecución <span class="required">*</span></label>
+        <div class="date-toggle">
+          <div class="date-option selected" data-date="today" id="dateToday">
+            <div>Hoy</div>
+            <div class="day" id="todayLabel"></div>
+          </div>
+          <div class="date-option" data-date="tomorrow" id="dateTomorrow">
+            <div>Mañana</div>
+            <div class="day" id="tomorrowLabel"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" id="submitBtn" onclick="submitForm()">Asignar Tarea</button>
+  </div>
+
+  <!-- Success -->
+  <div id="successView" class="hidden">
+    <div class="card success-page">
+      <div class="success-icon">✅</div>
+      <h2>Tarea asignada</h2>
+      <p id="successMsg"></p>
+      <div id="notificationResult"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const TOKEN = window.location.pathname.split('/').pop();
+const API = `/api/m/assign/${TOKEN}`;
+
+let employees = [], projects = [], teams = [];
+let selectedDate = 'today';
+let todayStr = '', tomorrowStr = '';
+
+async function init() {
+  try {
+    const [tokenRes, empRes, projRes, teamRes] = await Promise.all([
+      fetch(API).then(r => r.json()),
+      fetch(`${API}/employees`).then(r => r.json()),
+      fetch(`${API}/projects`).then(r => r.json()),
+      fetch(`${API}/teams`).then(r => r.json()),
+    ]);
+
+    if (!tokenRes.ok) throw new Error(tokenRes.error || 'Token inválido');
+
+    document.getElementById('supervisorName').textContent = tokenRes.supervisor.name;
+    employees = empRes.employees || [];
+    projects = projRes.projects || [];
+    teams = teamRes.teams || [];
+
+    // Compute dates
+    const now = new Date();
+    todayStr = now.toISOString().split('T')[0];
+    const tom = new Date(now.getTime() + 86400000);
+    tomorrowStr = tom.toISOString().split('T')[0];
+
+    const fmt = d => d.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' });
+    document.getElementById('todayLabel').textContent = fmt(now);
+    document.getElementById('tomorrowLabel').textContent = fmt(tom);
+
+    setupAutocomplete('employeeInput', 'employeeList', 'employeeId', employees, 'full_name', 'employee_id');
+    setupAutocomplete('projectInput', 'projectList', 'projectId', projects, 'project_name', 'project_id');
+    setupAutocomplete('teamInput', 'teamList', 'teamId', teams, 'team_name', 'team_id');
+
+    document.getElementById('loadingView').classList.add('hidden');
+    document.getElementById('formView').classList.remove('hidden');
+  } catch (err) {
+    document.getElementById('loadingView').classList.add('hidden');
+    document.getElementById('errorMsg').textContent = err.message || 'El enlace ha expirado o ya fue utilizado.';
+    document.getElementById('errorView').classList.remove('hidden');
+  }
+}
+
+function setupAutocomplete(inputId, listId, hiddenId, items, nameKey, idKey) {
+  const input = document.getElementById(inputId);
+  const list = document.getElementById(listId);
+  const hidden = document.getElementById(hiddenId);
+
+  input.addEventListener('input', () => {
+    hidden.value = '';
+    const q = input.value.toLowerCase().trim();
+    if (q.length < 1) { list.classList.remove('visible'); return; }
+    const filtered = items.filter(i => i[nameKey].toLowerCase().includes(q)).slice(0, 10);
+    list.innerHTML = filtered.map(i =>
+      `<div class="autocomplete-item" data-id="${i[idKey]}" data-name="${i[nameKey]}">${i[nameKey]}</div>`
+    ).join('');
+    list.classList.toggle('visible', filtered.length > 0);
+  });
+
+  list.addEventListener('click', (e) => {
+    const item = e.target.closest('.autocomplete-item');
+    if (!item) return;
+    input.value = item.dataset.name;
+    hidden.value = item.dataset.id;
+    list.classList.remove('visible');
+  });
+
+  input.addEventListener('blur', () => {
+    setTimeout(() => list.classList.remove('visible'), 200);
+  });
+}
+
+// Date toggle
+document.querySelectorAll('.date-option').forEach(el => {
+  el.addEventListener('click', () => {
+    document.querySelectorAll('.date-option').forEach(o => o.classList.remove('selected'));
+    el.classList.add('selected');
+    selectedDate = el.dataset.date;
+  });
+});
+
+async function submitForm() {
+  const title = document.getElementById('title').value.trim();
+  const description = document.getElementById('description').value.trim();
+  const employee_id = document.getElementById('employeeId').value;
+  const project_id = document.getElementById('projectId').value || null;
+  const team_id = document.getElementById('teamId').value || null;
+  const priority = document.getElementById('priority').value;
+  const planned_minutes = document.getElementById('plannedMinutes').value;
+  const due_date = selectedDate === 'today' ? todayStr : tomorrowStr;
+
+  if (!title) return alert('El título es requerido');
+  if (!employee_id) return alert('Selecciona un empleado de la lista');
+
+  const btn = document.getElementById('submitBtn');
+  btn.disabled = true;
+  btn.textContent = 'Asignando...';
+
+  try {
+    const res = await fetch(API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, description, employee_id, project_id, team_id, priority, planned_minutes, due_date }),
+    });
+    const data = await res.json();
+
+    if (!data.ok) throw new Error(data.error || 'Error al crear tarea');
+
+    const empName = document.getElementById('employeeInput').value;
+    const dateLabel = selectedDate === 'today' ? 'hoy' : 'mañana';
+    document.getElementById('successMsg').textContent = `"${title}" asignada a ${empName} para ${dateLabel}.`;
+
+    const notifDiv = document.getElementById('notificationResult');
+    if (data.notification) {
+      if (data.notification.sent) {
+        notifDiv.innerHTML = '<div style="color:var(--success);margin-top:12px">📩 Notificación enviada al empleado.</div>';
+      } else if (data.notification.warning) {
+        notifDiv.innerHTML = `<div class="warning-box"><span class="icon">⚠️</span>${data.notification.warning}</div>`;
+      }
+    } else if (selectedDate === 'tomorrow') {
+      notifDiv.innerHTML = '<div style="color:var(--muted);margin-top:12px;font-size:14px">La tarea aparecerá en su lista mañana al iniciar turno.</div>';
+    }
+
+    document.getElementById('formView').classList.add('hidden');
+    document.getElementById('successView').classList.remove('hidden');
+  } catch (err) {
+    alert(err.message);
+    btn.disabled = false;
+    btn.textContent = 'Asignar Tarea';
+  }
+}
+
+init();
+</script>
+</body>
+</html>

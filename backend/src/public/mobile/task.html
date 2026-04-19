@@ -1,0 +1,833 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#1a73e8">
+<title>TALINDA - Guía de Tarea</title>
+<style>
+  :root {
+    --primary: #1a73e8;
+    --success: #34a853;
+    --warning: #f9ab00;
+    --danger: #ea4335;
+    --bg: #f5f5f5;
+    --card: #ffffff;
+    --text: #202124;
+    --text-secondary: #5f6368;
+    --border: #dadce0;
+    --radius: 12px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding-bottom: 80px;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* ─── Header ────────────────────────────────────────── */
+  .header {
+    background: var(--primary);
+    color: white;
+    padding: 16px 20px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .header h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+  .header .subtitle { font-size: 13px; opacity: 0.85; }
+
+  /* ─── Progress bar ──────────────────────────────────── */
+  .progress-container {
+    background: rgba(255,255,255,0.2);
+    height: 8px;
+    border-radius: 4px;
+    margin-top: 12px;
+    overflow: hidden;
+  }
+  .progress-bar {
+    height: 100%;
+    background: white;
+    border-radius: 4px;
+    transition: width 0.4s ease;
+  }
+  .progress-text {
+    font-size: 12px;
+    margin-top: 4px;
+    opacity: 0.9;
+  }
+
+  /* ─── Sections ──────────────────────────────────────── */
+  .section { padding: 16px 20px; }
+  .section-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 12px;
+  }
+
+  /* ─── Task description ──────────────────────────────── */
+  .task-desc {
+    background: var(--card);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin: 12px 20px;
+    border: 1px solid var(--border);
+  }
+  .task-desc p { font-size: 14px; line-height: 1.5; color: var(--text-secondary); }
+
+  /* ─── Checklist cards ───────────────────────────────── */
+  .checklist-item {
+    background: var(--card);
+    border-radius: var(--radius);
+    margin-bottom: 12px;
+    border: 2px solid var(--border);
+    overflow: hidden;
+    transition: border-color 0.3s;
+  }
+  .checklist-item.done { border-color: var(--success); }
+  .checklist-item.skipped { border-color: var(--text-secondary); opacity: 0.7; }
+
+  .checklist-header {
+    padding: 16px;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    cursor: pointer;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .checklist-number {
+    background: var(--primary);
+    color: white;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  .checklist-item.done .checklist-number { background: var(--success); }
+  .checklist-item.skipped .checklist-number { background: var(--text-secondary); }
+
+  .checklist-info { flex: 1; }
+  .checklist-title { font-size: 16px; font-weight: 500; }
+  .checklist-title .required-badge {
+    background: var(--danger);
+    color: white;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: 8px;
+    font-weight: 600;
+    vertical-align: middle;
+  }
+  .checklist-status-icon {
+    font-size: 24px;
+    flex-shrink: 0;
+  }
+
+  .checklist-body {
+    display: none;
+    padding: 0 16px 16px;
+    border-top: 1px solid var(--border);
+  }
+  .checklist-item.expanded .checklist-body { display: block; }
+
+  .help-text {
+    font-size: 14px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin-top: 12px;
+    padding: 12px;
+    background: #f0f7ff;
+    border-radius: 8px;
+  }
+  .help-media { margin-top: 12px; }
+  .help-media img {
+    max-width: 100%;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  .help-media video {
+    max-width: 100%;
+    border-radius: 8px;
+  }
+
+  .checklist-time {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+  }
+
+  /* ─── Action buttons ────────────────────────────────── */
+  .actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+  }
+
+  .btn {
+    border: none;
+    border-radius: 10px;
+    padding: 14px 20px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    justify-content: center;
+    min-height: 52px;
+    transition: transform 0.1s, opacity 0.2s;
+    -webkit-appearance: none;
+    appearance: none;
+    touch-action: manipulation;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .btn-done { background: var(--success); color: white; }
+  .btn-skip { background: #e8eaed; color: var(--text); }
+  .btn-note { background: #e8f0fe; color: var(--primary); }
+  .btn-photo { background: #fce8e6; color: var(--danger); }
+  .btn-undo { background: var(--warning); color: white; }
+  .btn-delete-photo { background: #fce8e6; color: var(--danger); font-size: 12px; padding: 6px 10px; min-height: 32px; flex: none; }
+
+  /* ─── Note input ────────────────────────────────────── */
+  .note-input {
+    display: none;
+    margin-top: 12px;
+  }
+  .note-input.visible { display: block; }
+  .note-input textarea {
+    width: 100%;
+    border: 2px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 15px;
+    font-family: inherit;
+    resize: vertical;
+    min-height: 80px;
+  }
+  .note-input .btn { margin-top: 8px; }
+
+  .note-saved {
+    background: #f0f7ff;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    margin-top: 8px;
+    color: var(--text-secondary);
+  }
+
+  /* ─── Photo gallery ─────────────────────────────────── */
+  .photos-gallery {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .photo-thumb-container {
+    position: relative;
+    display: inline-block;
+  }
+  .photo-thumb {
+    width: 100px;
+    height: 100px;
+    object-fit: cover;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  .photo-delete-btn {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: var(--danger);
+    color: white;
+    border: 2px solid white;
+    font-size: 14px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+    touch-action: manipulation;
+    line-height: 1;
+    padding: 0;
+  }
+
+  .uploading-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #e8f0fe;
+    border-radius: 8px;
+    font-size: 13px;
+    color: var(--primary);
+    margin-top: 8px;
+  }
+  .uploading-indicator .mini-spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--border);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  /* ─── Resources ─────────────────────────────────────── */
+  .resource-item {
+    background: var(--card);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 10px;
+    border: 2px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    transition: border-color 0.3s;
+  }
+  .resource-item.confirmed { border-color: var(--success); }
+
+  .resource-info { flex: 1; }
+  .resource-name { font-size: 15px; font-weight: 500; }
+  .resource-detail { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
+  .resource-acq {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 600;
+    display: inline-block;
+    margin-top: 4px;
+  }
+  .resource-acq.own { background: #e6f4ea; color: #137333; }
+  .resource-acq.rent { background: #fef7e0; color: #b06000; }
+  .resource-acq.buy { background: #fce8e6; color: #c5221f; }
+
+  .toggle-switch {
+    flex-shrink: 0;
+    width: 52px;
+    height: 30px;
+    background: #dadce0;
+    border-radius: 15px;
+    position: relative;
+    transition: background 0.3s;
+    -webkit-appearance: none;
+    appearance: none;
+    border: none;
+    cursor: pointer;
+    touch-action: manipulation;
+    padding: 0;
+  }
+  .toggle-switch::after {
+    content: '';
+    width: 24px;
+    height: 24px;
+    background: white;
+    border-radius: 50%;
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    transition: transform 0.3s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  }
+  .resource-item.confirmed .toggle-switch {
+    background: var(--success);
+  }
+  .resource-item.confirmed .toggle-switch::after {
+    transform: translateX(22px);
+  }
+
+  /* ─── Team section ──────────────────────────────────── */
+  .team-card {
+    background: var(--card);
+    border-radius: var(--radius);
+    padding: 16px;
+    border: 2px solid #c8e6c9;
+  }
+  .team-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 10px;
+  }
+  .team-member {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .team-member:last-child { border-bottom: none; }
+  .team-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--primary);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  .team-member-name {
+    font-size: 14px;
+    font-weight: 500;
+  }
+
+  /* ─── Loading / Error states ────────────────────────── */
+  .loading {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--text-secondary);
+    font-size: 16px;
+  }
+  .loading .spinner {
+    width: 40px;
+    height: 40px;
+    border: 4px solid var(--border);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: 0 auto 16px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .error-page {
+    text-align: center;
+    padding: 80px 20px;
+    color: var(--danger);
+  }
+  .error-page .icon { font-size: 48px; margin-bottom: 16px; }
+
+  /* ─── Toast notifications ───────────────────────────── */
+  .toast {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%) translateY(100px);
+    background: #323232;
+    color: white;
+    padding: 12px 24px;
+    border-radius: 8px;
+    font-size: 14px;
+    z-index: 1000;
+    transition: transform 0.3s ease;
+    max-width: 90%;
+    text-align: center;
+  }
+  .toast.visible { transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <div class="loading" id="loadingView">
+    <div class="spinner"></div>
+    Cargando tarea...
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function() {
+  'use strict';
+
+  // Extract token from URL: /m/task/{token}
+  const pathParts = window.location.pathname.split('/');
+  const TOKEN = pathParts[pathParts.length - 1];
+  const API_BASE = `/api/m/task/${TOKEN}`;
+
+  let taskData = null;
+  let expandedItems = new Set(); // Track expanded state across re-renders
+
+  // ─── API Helpers ─────────────────────────────────────────────────────────
+  async function api(path, options = {}) {
+    const url = path.startsWith('/') ? path : `${API_BASE}${path ? '/' + path : ''}`;
+    const res = await fetch(url, {
+      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      ...options,
+    });
+    if (res.status === 401) {
+      showError('Este enlace ha expirado o no es válido.\nSolicita uno nuevo por WhatsApp.');
+      throw new Error('Unauthorized');
+    }
+    if (res.status === 413) {
+      throw new Error('La foto es muy grande. Intenta con menor resolución.');
+    }
+    return res.json();
+  }
+
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('visible');
+    setTimeout(() => t.classList.remove('visible'), 3000);
+  }
+
+  function showError(msg) {
+    document.getElementById('app').innerHTML = `
+      <div class="error-page">
+        <div class="icon">🔒</div>
+        <h2>${msg}</h2>
+      </div>`;
+  }
+
+  // ─── Load task data ──────────────────────────────────────────────────────
+  async function loadTask() {
+    try {
+      const data = await api('');
+      if (!data.ok) throw new Error(data.error);
+      taskData = data;
+      render();
+    } catch (err) {
+      if (err.message !== 'Unauthorized') {
+        showError('No se pudo cargar la tarea.\nVerifica tu conexión.');
+      }
+    }
+  }
+
+  // ─── Render ──────────────────────────────────────────────────────────────
+  function render() {
+    const { task, employee, checklist, resources, progress } = taskData;
+    const pct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+
+    let html = `
+      <div class="header">
+        <h1>${esc(task.title)}</h1>
+        <div class="subtitle">${esc(employee.fullName)} — ${task.workDate}</div>
+        <div class="progress-container">
+          <div class="progress-bar" style="width: ${pct}%"></div>
+        </div>
+        <div class="progress-text">${progress.done} de ${progress.total} pasos completados (${progress.requiredDone}/${progress.requiredTotal} requeridos)</div>
+      </div>`;
+
+    if (task.description) {
+      html += `<div class="task-desc"><p>${esc(task.description)}</p></div>`;
+    }
+
+    // Checklist
+    if (checklist.length > 0) {
+      html += `<div class="section"><div class="section-title">📋 Checklist</div>`;
+      checklist.forEach(function(item, i) {
+        var statusClass = item.status === 'done' ? 'done' : item.status === 'skipped' ? 'skipped' : '';
+        var statusIcon = item.status === 'done' ? '✅' : item.status === 'skipped' ? '⏭️' : '⬜';
+        var reqBadge = item.is_required ? '<span class="required-badge">REQUERIDO</span>' : '';
+        var isExpanded = expandedItems.has(item.id);
+        var photos = item.photos || [];
+
+        html += `
+          <div class="checklist-item ${statusClass} ${isExpanded ? 'expanded' : ''}" id="cl-${item.id}" data-id="${item.id}">
+            <div class="checklist-header" onclick="window.toggleExpand('${item.id}')">
+              <div class="checklist-number">${i + 1}</div>
+              <div class="checklist-info">
+                <div class="checklist-title">${esc(item.title)}${reqBadge}</div>
+                ${item.estimated_minutes ? `<div class="checklist-time">⏱️ ~${item.estimated_minutes} min</div>` : ''}
+              </div>
+              <div class="checklist-status-icon">${statusIcon}</div>
+            </div>
+            <div class="checklist-body">
+              ${item.help_text ? `<div class="help-text">💡 ${esc(item.help_text)}</div>` : ''}
+              ${item.help_image_url ? `<div class="help-media"><img src="${esc(item.help_image_url)}" alt="Ayuda visual" loading="lazy"></div>` : ''}
+              ${item.help_video_url ? `<div class="help-media"><video src="${esc(item.help_video_url)}" controls preload="none"></video></div>` : ''}
+              ${item.description ? `<p style="margin-top:12px;font-size:14px;color:var(--text-secondary)">${esc(item.description)}</p>` : ''}
+              ${item.note_text ? `<div class="note-saved">📝 ${esc(item.note_text)}</div>` : ''}`;
+
+        // Photo gallery (multiple photos)
+        if (photos.length > 0) {
+          html += `<div class="photos-gallery">`;
+          photos.forEach(function(p) {
+            html += `
+              <div class="photo-thumb-container">
+                <img class="photo-thumb" src="${esc(p.file_url)}" alt="Foto" loading="lazy"
+                     onclick="window.open('${esc(p.file_url)}','_blank')">
+                <button class="photo-delete-btn" onclick="window.deletePhoto('${item.id}','${p.photo_id}')"
+                        title="Eliminar foto">✕</button>
+              </div>`;
+          });
+          html += `</div>`;
+        }
+
+        // Upload progress indicator (hidden by default)
+        html += `<div class="uploading-indicator" id="uploading-${item.id}" style="display:none">
+                   <div class="mini-spinner"></div> Subiendo foto...
+                 </div>`;
+
+        html += `
+              <div class="actions">
+                ${item.status === 'pending' ? `
+                  <button class="btn btn-done" onclick="window.markItem('${item.id}','done')">✅ Hecho</button>
+                  <button class="btn btn-skip" onclick="window.markItem('${item.id}','skipped')">⏭️ Saltar</button>
+                ` : `
+                  <button class="btn btn-undo" onclick="window.markItem('${item.id}','pending')">↩️ Deshacer</button>
+                `}
+              </div>
+              <div class="actions">
+                <button class="btn btn-note" onclick="window.toggleNote('${item.id}')">📝 Nota</button>
+                ${item.requires_photo ? `<button class="btn btn-photo" onclick="window.takePhoto('${item.id}')">📸 Foto${photos.length > 0 ? ' (+)' : ''}</button>` : ''}
+              </div>
+              <div class="note-input" id="note-${item.id}">
+                <textarea placeholder="Escribe una nota..." id="note-text-${item.id}">${esc(item.note_text || '')}</textarea>
+                <button class="btn btn-done" onclick="window.saveNote('${item.id}')" style="flex:none;padding:10px 16px">Guardar nota</button>
+              </div>
+              <input type="file" accept="image/*,.heic,.heif" capture="environment"
+                     id="photo-input-${item.id}" style="display:none"
+                     onchange="window.uploadPhoto('${item.id}', this)">
+            </div>
+          </div>`;
+      });
+      html += `</div>`;
+    }
+
+    // Resources — card with toggle switch
+    if (resources.length > 0) {
+      html += `<div class="section"><div class="section-title">🔧 Recursos Requeridos</div>
+               <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px">Desliza el interruptor para confirmar disponibilidad</p>`;
+      resources.forEach(function(r) {
+        var acqLabels = { own: 'Propio', rent: 'Alquilar', buy: 'Comprar' };
+        var acqLabel = acqLabels[r.acquisition] || r.acquisition;
+        var isConfirmed = r.confirmed === true;
+
+        html += `
+          <div class="resource-item ${isConfirmed ? 'confirmed' : ''}" id="res-${r.id}">
+            <div class="resource-info">
+              <div class="resource-name">${esc(r.resource_name)}</div>
+              ${r.quantity ? `<div class="resource-detail">${r.quantity}${r.unit ? ' ' + esc(r.unit) : ''}</div>` : ''}
+              ${r.description ? `<div class="resource-detail">${esc(r.description)}</div>` : ''}
+              <span class="resource-acq ${r.acquisition}">${acqLabel}</span>
+            </div>
+            <button class="toggle-switch" onclick="event.stopPropagation(); window.toggleResource('${r.id}')"></button>
+          </div>`;
+      });
+      html += `</div>`;
+    }
+
+    // Team (equipo de apoyo)
+    var team = taskData.team;
+    if (team && team.members && team.members.length > 0) {
+      html += `<div class="section"><div class="section-title">👥 Equipo de Apoyo</div>`;
+      html += `<div class="team-card">`;
+      html += `<div class="team-name">${esc(team.teamName)}</div>`;
+      team.members.forEach(function(m) {
+        var initials = m.name.split(' ').map(function(w) { return w[0]; }).join('').substring(0, 2).toUpperCase();
+        html += `
+          <div class="team-member">
+            <div class="team-avatar">${initials}</div>
+            <div class="team-member-name">${esc(m.name)}</div>
+          </div>`;
+      });
+      html += `</div></div>`;
+    }
+
+    document.getElementById('app').innerHTML = html;
+  }
+
+  // ─── Actions ─────────────────────────────────────────────────────────────
+  window.toggleExpand = function(id) {
+    if (expandedItems.has(id)) {
+      expandedItems.delete(id);
+    } else {
+      expandedItems.add(id);
+    }
+    var el = document.getElementById('cl-' + id);
+    if (el) el.classList.toggle('expanded');
+  };
+
+  window.markItem = async function(id, status) {
+    try {
+      var data = await api('checklist/' + id, {
+        method: 'PUT',
+        body: JSON.stringify({ status: status }),
+      });
+      if (data.ok) {
+        var item = taskData.checklist.find(function(c) { return c.id === id; });
+        if (item) item.status = status;
+        taskData.progress = data.progress;
+        expandedItems.add(id); // Keep expanded
+        render();
+        var msgs = { done: '✅ Paso completado', skipped: '⏭️ Paso saltado', pending: '↩️ Paso restablecido' };
+        showToast(msgs[status] || 'Actualizado');
+      }
+    } catch (err) {
+      showToast('Error al actualizar');
+    }
+  };
+
+  window.toggleNote = function(id) {
+    var el = document.getElementById('note-' + id);
+    if (el) el.classList.toggle('visible');
+  };
+
+  window.saveNote = async function(id) {
+    var textarea = document.getElementById('note-text-' + id);
+    var note = textarea ? textarea.value.trim() : '';
+    try {
+      var data = await api('checklist/' + id, {
+        method: 'PUT',
+        body: JSON.stringify({ note: note }),
+      });
+      if (data.ok) {
+        var item = taskData.checklist.find(function(c) { return c.id === id; });
+        if (item) item.note_text = note;
+        expandedItems.add(id);
+        render();
+        showToast('📝 Nota guardada');
+      }
+    } catch (err) {
+      showToast('Error al guardar nota');
+    }
+  };
+
+  window.takePhoto = function(id) {
+    var input = document.getElementById('photo-input-' + id);
+    if (input) {
+      input.value = ''; // Reset so same file can be re-selected
+      input.click();
+    }
+  };
+
+  window.uploadPhoto = async function(id, input) {
+    if (!input.files || !input.files[0]) return;
+
+    // Show uploading indicator
+    var indicator = document.getElementById('uploading-' + id);
+    if (indicator) indicator.style.display = 'inline-flex';
+
+    try {
+      var formData = new FormData();
+      formData.append('photo', input.files[0]);
+
+      var res = await fetch(API_BASE + '/checklist/' + id + '/photo', {
+        method: 'POST',
+        body: formData,
+      });
+
+      var data = await res.json();
+      if (data.ok) {
+        // Add the new photo to local data ONLY on success
+        var item = taskData.checklist.find(function(c) { return c.id === id; });
+        if (item) {
+          if (!item.photos) item.photos = [];
+          item.photos.push(data.photo);
+        }
+        expandedItems.add(id);
+        render();
+        showToast('📸 Foto guardada');
+      } else {
+        showToast(data.error || 'Error al subir foto');
+      }
+    } catch (err) {
+      showToast('Error al subir foto');
+    } finally {
+      if (indicator) indicator.style.display = 'none';
+    }
+  };
+
+  window.deletePhoto = async function(checklistId, photoId) {
+    if (!confirm('¿Eliminar esta foto?')) return;
+    try {
+      var res = await fetch(API_BASE + '/checklist/' + checklistId + '/photo/' + photoId, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      var data = await res.json();
+      if (data.ok) {
+        // Remove from local data
+        var item = taskData.checklist.find(function(c) { return c.id === checklistId; });
+        if (item && item.photos) {
+          item.photos = item.photos.filter(function(p) { return p.photo_id !== photoId; });
+        }
+        expandedItems.add(checklistId);
+        render();
+        showToast('🗑️ Foto eliminada');
+      } else {
+        showToast(data.error || 'Error al eliminar');
+      }
+    } catch (err) {
+      showToast('Error al eliminar foto');
+    }
+  };
+
+  window.toggleResource = async function(id) {
+    // Find current state and toggle it
+    var r = taskData.resources.find(function(x) { return x.id === id; });
+    if (!r) return;
+    var newConfirmed = !r.confirmed;
+
+    // Optimistic UI update
+    r.confirmed = newConfirmed;
+    render();
+
+    try {
+      var data = await api('resource/' + id, {
+        method: 'PUT',
+        body: JSON.stringify({ confirmed: newConfirmed }),
+      });
+      if (data.ok) {
+        showToast(newConfirmed ? '✅ Recurso confirmado' : 'Recurso desmarcado');
+      } else {
+        // Revert on error
+        r.confirmed = !newConfirmed;
+        render();
+        showToast('Error al actualizar recurso');
+      }
+    } catch (err) {
+      r.confirmed = !newConfirmed;
+      render();
+      showToast('Error al actualizar recurso');
+    }
+  };
+
+  // ─── Helpers ─────────────────────────────────────────────────────────────
+  function esc(str) {
+    if (!str) return '';
+    var d = document.createElement('div');
+    d.textContent = str;
+    return d.innerHTML;
+  }
+
+  // ─── Auto refresh (every 30s) ────────────────────────────────────────────
+  setInterval(async function() {
+    try {
+      var data = await api('progress');
+      if (data.ok && taskData) {
+        taskData.progress = data.progress;
+        var bar = document.querySelector('.progress-bar');
+        var text = document.querySelector('.progress-text');
+        if (bar && text && data.progress.total > 0) {
+          var pct = Math.round((data.progress.done / data.progress.total) * 100);
+          bar.style.width = pct + '%';
+          text.textContent = data.progress.done + ' de ' + data.progress.total + ' pasos completados (' + data.progress.requiredDone + '/' + data.progress.requiredTotal + ' requeridos)';
+        }
+      }
+    } catch (e) { /* silent */ }
+  }, 30000);
+
+  // ─── Init ────────────────────────────────────────────────────────────────
+  loadTask();
+})();
+</script>
+</body>
+</html>
