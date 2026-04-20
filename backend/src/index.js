@@ -9,6 +9,7 @@ const { testConnection } = require('./config/database');
 const webhookRoutes = require('./routes/webhook');
 const apiRoutes = require('./routes/api');
 const mobileRoutes = require('./routes/mobile');
+const externalRoutes = require('./routes/external');
 const { startAutoCheckinCron } = require('./cron/autoCheckin');
 const { startOutboxWorker } = require('./cron/outboxWorker');
 const { startAutoCheckoutCron } = require('./cron/autoCheckout');
@@ -59,6 +60,7 @@ app.get('/m/escalation/:token', (req, res) => {
 app.use('/api/m', mobileRoutes);
 
 app.use('/webhook', webhookRoutes);
+app.use('/api/external', externalRoutes);  // ← antes de /api para evitar colisión
 app.use('/api', apiRoutes);
 
 // Root
@@ -79,6 +81,15 @@ app.get('/', (req, res) => {
         messages: 'GET /api/employees/:id/messages',
         nlpStats: 'GET /api/nlp/stats',
         outbox: 'GET /api/outbox',
+      },
+      external: {
+        _auth: 'X-API-Key: <EXTERNAL_API_KEY env>',
+        createTask: 'POST /api/external/tasks',
+        findByRef: 'GET  /api/external/tasks?external_source=<s>&external_ref=<r>',
+        getTask:   'GET  /api/external/tasks/:task_id',
+        updateTask:'PATCH /api/external/tasks/:task_id',
+        cancelTask:'DELETE /api/external/tasks/:task_id',
+        attach:    'POST /api/external/tasks/:task_id/attachments',
       },
     },
   });

@@ -178,9 +178,48 @@ Intent `TASK_SWITCH` (compuesto) está **diferido**. Medir antes (ver
 - `migrations/016_waiting_switch_confirm_state.sql` — añade al enum
   `app.session_state`: `WAITING_SWITCH_CONFIRM`, `WAITING_LOCATION`,
   `WAITING_NEXT_TASK_CONFIRM`. **Correr antes** de desplegar los fixes 1-5.
+- `migrations/017_tasks_external_source.sql` — añade a `app.tasks`:
+  `external_source`, `external_ref`, `external_meta` (jsonb) + índice
+  único (source, ref) para idempotencia. Habilita el endpoint
+  `/api/external/tasks` para sistemas externos. **Correr** antes de
+  aplicar optel-redes contra este bot.
 
 Las migraciones son SQL crudo. No hay framework (como alembic, flyway). Se
 aplican manualmente con `psql -f`.
+
+## External Tasks API (sistemas externos como optel-redes)
+
+El bot expone `/api/external/tasks` autenticado con `X-API-Key` (env var
+`EXTERNAL_API_KEY`) para que sistemas como **optel-redes** (NOC/Help-Desk)
+generen tickets que se asignan a empleados y se notifican por Telegram
+igual que una asignación de supervisor.
+
+### Endpoints
+| Método | Path | Uso |
+|---|---|---|
+| `POST`   | `/api/external/tasks` | Crear ticket. Idempotente por `(external_source, external_ref)` |
+| `GET`    | `/api/external/tasks?external_source=X&external_ref=Y` | Buscar por ref externa |
+| `GET`    | `/api/external/tasks/:task_id` | Detalle (task + instances + scheduled_dates + attachments) |
+| `PATCH`  | `/api/external/tasks/:task_id` | Editar / reasignar (notify opt-in) |
+| `DELETE` | `/api/external/tasks/:task_id` | Cancelar (cancela instances pendientes + notifica) |
+| `POST`   | `/api/external/tasks/:task_id/attachments` | Anexar link/foto/documento |
+
+### Código clave
+- Service: `backend/src/services/externalTasksService.js` (aislado del
+  taskService general, errores tipados con `ExternalTaskError`).
+- Router: `backend/src/routes/external.js` (registrado en `index.js`
+  **antes** de `/api` para evitar colisión de match).
+- Tabla de attachments: reutiliza `app.attachments` (existente desde
+  migración 005, `task_id` nullable). No se creó tabla nueva.
+
+### Integraciones conocidas
+- **optel-redes** (NOC/Help-Desk, mismo server Hetzner): usa un cliente
+  Python en `<repo optel-redes>/backend/app/clients/bot_tasks.py` que
+  invoca estos endpoints. Comparte `EXTERNAL_API_KEY` vía `.env`.
+
+### Si el endpoint devuelve 503
+Significa que `EXTERNAL_API_KEY` no está configurado en el `.env` del
+bot. Es a propósito — si no hay key, no se aceptan llamadas externas.
 
 ## Gotchas descubiertos (aprender de mis errores)
 
