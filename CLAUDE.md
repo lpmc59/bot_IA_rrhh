@@ -183,6 +183,12 @@ Intent `TASK_SWITCH` (compuesto) está **diferido**. Medir antes (ver
   único (source, ref) para idempotencia. Habilita el endpoint
   `/api/external/tasks` para sistemas externos. **Correr** antes de
   aplicar optel-redes contra este bot.
+- `migrations/018_escalation_reason_open_tasks.sql` — añade al enum
+  `app.escalation_reason` los valores `OPEN_TASKS_SHIFT_END` (nuevo Alert 4)
+  y `POST_CHECKOUT_ACTION` (por si faltaba). **Correr después** de 017 o
+  junto con los fixes del cron de supervisor. Sin esto, el cron
+  `supervisorAlerts` crashea cada 15 min con
+  `invalid input value for enum escalation_reason`.
 
 Las migraciones son SQL crudo. No hay framework (como alembic, flyway). Se
 aplican manualmente con `psql -f`.
@@ -232,6 +238,7 @@ bot. Es a propósito — si no hay key, no se aceptan llamadas externas.
 | 5 | `task_instances.planned_minutes` es columna **legacy orfana** | Nunca se popula. Reportes deben usar `standard_minutes` (de `shift_task_templates.standard_minutes` o `task_templates.default_minutes`). `planned_minutes` reservado para asignaciones individuales futuras. |
 | 6 | `Alert 2 (NO_TASK_1H)` antes no filtraba por fin de turno | Fijado con JOIN a `shift_assignments` + `shift_templates` y check `NOW() < end_time + grace`. |
 | 7 | OpenClaw agente vs gateway | El "gateway" es solo API loopback. Sin agente LLM con SOUL.md, OpenClaw no relaya respuestas del backend. `openclaw onboard` arma ambos. |
+| 8 | Nuevos `reason` en `escalation_reason` necesitan `ALTER TYPE` antes del deploy | El enum `app.escalation_reason` es cerrado; agregar un nuevo valor (ej. `OPEN_TASKS_SHIFT_END`) requiere migración `ALTER TYPE ... ADD VALUE IF NOT EXISTS` **antes** de desplegar el código que lo usa. De lo contrario el cron crashea con `invalid input value for enum escalation_reason`. Misma regla aplica a `app.session_state` (ver migración 016). |
 
 ## Decisiones de diseño claves
 
