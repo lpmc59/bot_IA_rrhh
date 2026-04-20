@@ -35,6 +35,12 @@ coverage/
 .tmp/
 temp/
 __pycache__/
+*.pyc
+*.pyo
+
+# Python (por si se agregan scripts futuros)
+venv/
+.venv/
 
 # OpenClaw / sessions / runtime
 backend/uploads/

@@ -283,6 +283,12 @@ son candidatos a agregar al regex local o al DB keyword dictionary.
 - [ ] Revisar logs de `claude_returned_task_switch` (Señal 4).
 - [ ] Correr Señal 5 y/o revisar logs de `picker_reprint_triggered`.
 - [ ] Correr Señal 6 y extraer top-10 mensajes UNKNOWN repetidos.
+- [ ] Correr Señal 7.1 — volumen diario de alertas por reason.
+- [ ] Correr Señal 7.2 — verificar 0 filas (NO_TASK_1H post-fin de turno).
+- [ ] Correr Señal 7.3 — identificar empleados recurrentes en Alert 4.
+- [ ] Correr Señal 7.4 — ratio in_progress vs blocked en Alert 4.
+- [ ] Correr Señal 7.5 — % reconocimiento del supervisor por alerta.
+- [ ] Correr Señal 7.7 — distribución de cierres post-fin para calibrar grace.
 
 ## Árbol de decisión
 
@@ -310,12 +316,223 @@ son candidatos a agregar al regex local o al DB keyword dictionary.
 
 ---
 
+## Señal 7 — Alertas al supervisor (Alerts 1–4)
+
+**Contexto**: después del ajuste al Alert 2 (ventana de actividad + check de
+fin de turno) y la introducción del Alert 4 (`OPEN_TASKS_SHIFT_END`),
+necesitamos verificar que las 4 alertas disparan cuando deben y no más.
+
+Código: `backend/src/cron/supervisorAlerts.js` — cron cada 15 min.
+
+| Reason | Cuándo dispara | Env vars |
+|--------|----------------|----------|
+| `NO_CHECKIN_1H` | Turno empezó hace >N min y el empleado no hizo check-in. | `ALERT_NO_CHECKIN_MINUTES` (60) |
+| `NO_TASK_1H` | Empleado con check-in pero sin actividad de tarea en los últimos N min, turno aún activo, con `planned`/`blocked` pendientes. | `ALERT_NO_TASK_MINUTES` (60), `ALERT_SHIFT_END_GRACE_MINUTES` (0) |
+| `TASK_OVERTIME` | Tarea `in_progress` con tiempo transcurrido > `factor × standard_minutes`. | `ALERT_OVERTIME_FACTOR` (2) |
+| `OPEN_TASKS_SHIFT_END` | Turno terminó hace >N min y el empleado dejó tareas `in_progress`/`blocked`. | `ALERT_OPEN_TASKS_END_GRACE_MINUTES` (15) |
+
+### 7.1 Volumen diario por tipo de alerta
+
+```sql
+-- Alertas emitidas por día y razón (últimos 14 días)
+SELECT work_date,
+       reason,
+       COUNT(*) AS cantidad,
+       COUNT(DISTINCT employee_id) AS empleados_unicos
+FROM app.supervisor_escalations
+WHERE work_date >= CURRENT_DATE - 14
+  AND reason IN ('NO_CHECKIN_1H', 'NO_TASK_1H', 'TASK_OVERTIME', 'OPEN_TASKS_SHIFT_END')
+GROUP BY work_date, reason
+ORDER BY work_date DESC, reason;
+```
+
+**Lectura esperada**: volúmenes estables día a día. Un pico súbito en
+`NO_TASK_1H` o `OPEN_TASKS_SHIFT_END` indica cambio de patrón operativo,
+un cron corriendo con grace incorrecto, o una migración de turnos.
+
+### 7.2 Sospecha de falsos positivos en `NO_TASK_1H` post-fix
+
+**Pregunta**: ¿sigue disparando después del fin de turno? (No debería con
+el JOIN a `shift_templates` y el check `NOW() < end_time + grace`.)
+
+```sql
+-- NO_TASK_1H disparadas DESPUÉS del fin de turno del empleado.
+-- Si devuelve filas, hay un bug en el filtro de end_time o la tz está mal.
+SELECT esc.created_at,
+       e.full_name,
+       st.shift_code,
+       st.end_time,
+       esc.created_at::time AS alerted_at_time,
+       (esc.created_at::time - st.end_time) AS tiempo_post_fin
+FROM app.supervisor_escalations esc
+JOIN app.employees e          ON e.employee_id = esc.employee_id
+JOIN app.shift_assignments sa ON sa.employee_id = e.employee_id AND sa.work_date = esc.work_date
+JOIN app.shift_templates   st ON st.shift_id  = sa.shift_id
+WHERE esc.reason = 'NO_TASK_1H'
+  AND esc.work_date >= CURRENT_DATE - 14
+  AND esc.created_at::time > st.end_time
+  AND st.end_time > st.start_time  -- excluir turnos nocturnos (lógica distinta)
+ORDER BY esc.created_at DESC;
+```
+
+**Umbral**: 0 filas esperado. ≥1 fila → revisar timezone del servidor
+Postgres vs la del cron Node (`NOW()` vs `CURRENT_DATE + end_time`).
+
+### 7.3 Cuántos empleados dejan tareas sin cerrar (Alert 4)
+
+```sql
+-- Empleados que recurrentemente disparan OPEN_TASKS_SHIFT_END.
+-- Candidatos a coaching o a revisar si sus tareas realmente deben cerrarse
+-- manualmente o si el flujo de checkout debería auto-cerrarlas.
+SELECT e.full_name,
+       COUNT(*) AS veces_alertado,
+       MIN(esc.work_date) AS primera,
+       MAX(esc.work_date) AS ultima
+FROM app.supervisor_escalations esc
+JOIN app.employees e ON e.employee_id = esc.employee_id
+WHERE esc.reason = 'OPEN_TASKS_SHIFT_END'
+  AND esc.work_date >= CURRENT_DATE - 30
+GROUP BY e.full_name
+HAVING COUNT(*) >= 3
+ORDER BY veces_alertado DESC;
+```
+
+**Acción**: si hay 3+ empleados con ≥5 alertas/mes, considerar:
+- Recordatorio proactivo al empleado 5 min antes del fin de turno con sus
+  tareas abiertas (nueva feature).
+- Auto-close de `in_progress` al checkout con confirmación del empleado.
+
+### 7.4 Composición de Alert 4: in_progress vs blocked
+
+**Pregunta**: ¿las alertas son mayormente por olvido de cerrar
+(in_progress) o por problemas reales (blocked)?
+
+El texto del mensaje incluye ambos counts. Para extraer stats de DB:
+
+```sql
+-- Extraer cantidad de tareas abiertas al alertar.
+-- Parse simple del mensaje (busca "Dejó N tareas").
+SELECT work_date,
+       COUNT(*) AS alertas,
+       AVG(
+         NULLIF(
+           (regexp_match(inbound_text, 'Dejó (\d+) tarea'))[1]::int,
+           0
+         )
+       ) AS promedio_tareas_abiertas,
+       COUNT(*) FILTER (WHERE inbound_text ILIKE '%🚫 *Bloqueadas%') AS con_bloqueadas
+FROM app.supervisor_escalations
+WHERE reason = 'OPEN_TASKS_SHIFT_END'
+  AND work_date >= CURRENT_DATE - 14
+GROUP BY work_date
+ORDER BY work_date DESC;
+```
+
+Si `con_bloqueadas / alertas` es alto (>50%), el problema real no es
+"olvido de cerrar" sino tareas que se quedan bloqueadas sin resolución →
+revisar el flujo `WAITING_BLOCK_REASON` y el seguimiento de bloqueadas.
+
+### 7.5 Tiempo de reconocimiento del supervisor
+
+```sql
+-- ¿Cuánto tarda un supervisor en reconocer la alerta vs. ignorarla?
+-- Útil para medir si el formato nuevo (más info contextual) mejora respuesta.
+SELECT reason,
+       COUNT(*) AS total,
+       COUNT(*) FILTER (WHERE acknowledged_at IS NOT NULL) AS reconocidas,
+       ROUND(
+         100.0 * COUNT(*) FILTER (WHERE acknowledged_at IS NOT NULL)
+         / NULLIF(COUNT(*), 0),
+         1
+       ) AS pct_reconocidas,
+       AVG(
+         EXTRACT(EPOCH FROM (acknowledged_at - created_at)) / 60
+       ) FILTER (WHERE acknowledged_at IS NOT NULL) AS min_promedio_ack
+FROM app.supervisor_escalations
+WHERE work_date >= CURRENT_DATE - 14
+GROUP BY reason
+ORDER BY reason;
+```
+
+**Umbral**: `pct_reconocidas` <50% significa que el supervisor está
+saturado o ignorando alertas → reducir volumen (subir thresholds) o
+consolidar (ej. un resumen diario en vez de alertas individuales).
+
+### 7.6 Alertas por turno
+
+```sql
+-- Ver si ciertos turnos concentran alertas (ej. turno nocturno con menor
+-- supervisión vs diurno).
+SELECT st.shift_code,
+       esc.reason,
+       COUNT(*) AS cantidad
+FROM app.supervisor_escalations esc
+JOIN app.employees e          ON e.employee_id = esc.employee_id
+JOIN app.shift_assignments sa ON sa.employee_id = e.employee_id AND sa.work_date = esc.work_date
+JOIN app.shift_templates   st ON st.shift_id  = sa.shift_id
+WHERE esc.work_date >= CURRENT_DATE - 14
+GROUP BY st.shift_code, esc.reason
+ORDER BY st.shift_code, cantidad DESC;
+```
+
+### 7.7 Tuning de `ALERT_OPEN_TASKS_END_GRACE_MINUTES`
+
+Si el default `15` min es muy corto, el empleado se siente "acosado".
+Si es muy largo, el supervisor se entera tarde.
+
+```sql
+-- Ver cuánto tardan los empleados en cerrar sus últimas tareas después
+-- del fin de turno (distribución). Ayuda a calibrar el grace.
+SELECT
+  WIDTH_BUCKET(
+    EXTRACT(EPOCH FROM (ti.completed_at - (sa.work_date + st.end_time))) / 60,
+    -30, 60, 9
+  ) AS bucket,
+  COUNT(*) AS tareas
+FROM app.task_instances ti
+JOIN app.shift_assignments sa ON sa.employee_id = ti.employee_id AND sa.work_date = ti.work_date
+JOIN app.shift_templates   st ON st.shift_id  = sa.shift_id
+WHERE ti.completed_at IS NOT NULL
+  AND ti.work_date >= CURRENT_DATE - 30
+  AND st.end_time > st.start_time
+  AND ti.completed_at::time BETWEEN (st.end_time - INTERVAL '30 min')
+                                AND (st.end_time + INTERVAL '60 min')
+GROUP BY bucket
+ORDER BY bucket;
+```
+
+Lectura: si la mayoría de cierres caen en los primeros 10 min post-fin,
+`grace=15` está bien. Si se extienden a 20–25 min, subir a `20`.
+
+---
+
 ## Migraciones relacionadas
 
 - `migrations/016_waiting_switch_confirm_state.sql` — añade
   `WAITING_SWITCH_CONFIRM` (y `WAITING_LOCATION`, `WAITING_NEXT_TASK_CONFIRM`
   por si faltan) al enum `app.session_state`. **Correr antes** de desplegar
   los fixes 1–5 en producción.
+
+## Cambios a `supervisorAlerts.js` (Señal 7)
+
+Sin migración de schema. Solo requiere reiniciar el backend para que el
+cron recoja los cambios.
+
+- **Alert 2 (`NO_TASK_1H`)**: ahora JOIN con `shift_assignments` +
+  `shift_templates` y filtra `NOW() < end_time + SHIFT_END_GRACE_MINUTES`.
+  Evita falsos positivos post-turno.
+- **Alert 2**: criterio de "actividad" expandido — tarea `in_progress`
+  OR `last_update_at` reciente OR `completed_at` reciente. Evita falsos
+  positivos durante transición entre rutinaria cerrada y ad-hoc nueva.
+- **Alert 4 (`OPEN_TASKS_SHIFT_END`)**: NUEVA. Empleado con turno
+  terminado y tareas `in_progress`/`blocked` sin cerrar.
+
+**Nuevas env vars opcionales** (todas tienen default sensato):
+
+| Variable | Default | Efecto |
+|----------|---------|--------|
+| `ALERT_SHIFT_END_GRACE_MINUTES` | `0` | Alert 2 deja de disparar este número de min después del fin de turno. `0` = estricto. |
+| `ALERT_OPEN_TASKS_END_GRACE_MINUTES` | `15` | Alert 4 espera este número de min después del fin de turno antes de disparar. |
 
 ## Notas de despliegue
 
