@@ -230,6 +230,12 @@ async function createExternalTask(params) {
          FROM app.task_instances WHERE employee_id = $1 AND work_date = $2`,
         [employeeId, today]
       );
+      // Sin ON CONFLICT: el UNIQUE (employee_id, work_date, task_id) es
+      // índice parcial (WHERE task_id IS NOT NULL) y Postgres no resuelve
+      // ON CONFLICT sobre índices parciales sin repetir el predicado.
+      // No es necesario aquí: findExternalTaskByRef ya protegió la
+      // idempotencia a nivel task, así que el task.task_id recién creado
+      // nunca puede colisionar con un task_instance previo.
       const instRes = await client.query(
         `INSERT INTO app.task_instances (
            employee_id, work_date, shift_id, task_id,
@@ -240,7 +246,6 @@ async function createExternalTask(params) {
            $5, $6, $7,
            'planned', $8, NULL, 0
          )
-         ON CONFLICT (employee_id, work_date, task_id) DO NOTHING
          RETURNING *`,
         [
           employeeId, today, shiftRow.rows[0]?.shift_id || null, task.task_id,
