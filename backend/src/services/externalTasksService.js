@@ -198,7 +198,8 @@ async function createExternalTask(params) {
        RETURNING *`,
       [
         employeeId, projectId, title.trim(), description || null, priority,
-        plannedMinutes, primaryDate,
+        // app.tasks.planned_minutes es NOT NULL → default 0 si el caller no lo pasa
+        plannedMinutes ?? 0, primaryDate,
         frequency, teamId,
         externalSource, externalRef, meta ? JSON.stringify(meta) : null,
       ]
@@ -249,7 +250,7 @@ async function createExternalTask(params) {
          RETURNING *`,
         [
           employeeId, today, shiftRow.rows[0]?.shift_id || null, task.task_id,
-          title.trim(), description || null, plannedMinutes,
+          title.trim(), description || null, plannedMinutes ?? 0,
           ordRow.rows[0].next_ord,
         ]
       );
