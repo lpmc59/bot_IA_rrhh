@@ -100,6 +100,22 @@ app.get('/', (req, res) => {
 async function start() {
   logger.info('Starting TALINDA OpenClaw Backend...');
 
+  // ── Env var sanity checks (warnings no bloquean el arranque) ──────────────
+  // MOBILE_BASE_URL es obligatorio para que los links de Telegram
+  // (/m/assign, /m/task, /m/escalation) apunten al dominio público.
+  const mbu = process.env.MOBILE_BASE_URL;
+  if (!mbu || mbu === 'http://localhost:3000' || mbu === 'https://' || !/^https?:\/\/.+/.test(mbu)) {
+    logger.warn(
+      'MOBILE_BASE_URL no está correctamente configurado — los links que se envían por Telegram' +
+      ' (/m/assign, /m/task, /m/escalation) apuntarán al fallback http://localhost:3000 y NO serán accesibles al empleado.' +
+      ' Seteá en el .env algo como: MOBILE_BASE_URL=https://gestion.talinda.es'
+    );
+  }
+  // EXTERNAL_API_KEY sin valor → endpoint /api/external/tasks queda deshabilitado (503)
+  if (!process.env.EXTERNAL_API_KEY) {
+    logger.info('EXTERNAL_API_KEY no configurado — endpoint /api/external/tasks responderá 503. (OK si no usás integraciones externas.)');
+  }
+
   // Test database connection
   const dbOk = await testConnection();
   if (!dbOk) {
