@@ -125,6 +125,52 @@ async function start() {
     process.exit(1);
   }
 
+  // ── TZ alignment check (warning si las 3 capas no coinciden) ─────────────
+  // El bot necesita que Node, APP_TIMEZONE y el timezone de Postgres
+  // coincidan con la zona operativa. Un mismatch típico:
+  //   - APP_TIMEZONE=Europe/Madrid (heredado de Talinda)
+  //   - pero Postgres timezone = America/Guatemala
+  // → `getTodayDate()` devuelve un día distinto al `CURRENT_DATE` del SQL,
+  //   y las tareas "de hoy" quedan en work_date distinto al que busca el bot.
+  // Ocurrió en Hetzner abr-2026. Ver CLAUDE.md gotcha #11.
+  try {
+    const appTz = process.env.APP_TIMEZONE || 'America/Guatemala';
+    const processTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const { query } = require('./config/database');
+    const r = await query(`SELECT current_setting('TimeZone') AS pg_tz, CURRENT_DATE::text AS pg_today`);
+    const pgTz = r.rows[0].pg_tz;
+    const pgToday = r.rows[0].pg_today;
+    const nodeToday = new Date().toLocaleDateString('sv-SE', { timeZone: appTz });
+
+    logger.info('TZ check', {
+      appTimezone: appTz,
+      processTimezone: processTz,
+      postgresTimezone: pgTz,
+      nodeToday,
+      pgToday,
+    });
+
+    if (nodeToday !== pgToday) {
+      logger.warn(
+        `TZ MISMATCH: getTodayDate() dice ${nodeToday} (APP_TIMEZONE=${appTz}) ` +
+        `pero Postgres dice ${pgToday} (timezone=${pgTz}). ` +
+        `Las tareas creadas podrían quedar en fechas distintas a las que el bot busca. ` +
+        `Fix: alinear APP_TIMEZONE del .env con el timezone de Postgres ` +
+        `(ALTER SYSTEM SET timezone='${appTz}'; SELECT pg_reload_conf();). ` +
+        `Ver CLAUDE.md gotcha #11.`
+      );
+    }
+    if (pgTz !== appTz && pgTz !== 'UTC') {
+      // Cualquier mismatch que no sea UTC → advertir (UTC→appTz es recuperable con el helper)
+      logger.warn(
+        `TZ advisory: Postgres timezone=${pgTz} != APP_TIMEZONE=${appTz}. ` +
+        `Recomendado alinear para evitar confusiones futuras.`
+      );
+    }
+  } catch (err) {
+    logger.warn('TZ check failed', { err: err.message });
+  }
+
   // Start cron jobs
   startAutoCheckinCron();
   startAutoCheckoutCron();
