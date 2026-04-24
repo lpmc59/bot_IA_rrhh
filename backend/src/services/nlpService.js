@@ -29,6 +29,38 @@ const LOCAL_PATTERNS = {
       /(estoy\s+saliendo|me\s+voy|ya\s+me\s+voy|termin[eéo]\s+(?:mi\s+)?(?:turno|jornada|d[ií]a)|fin\s+de\s+(?:turno|jornada)|salgo\s+del\s+trabajo|ya\s+sal[ií]|me\s+retiro|finalic[eé]\s+(?:mi\s+)?(?:turno|jornada)|hora\s+de\s+(?:salida|irme)|ya\s+termin[eé]\s+(?:mi\s+)?(?:turno|jornada))/i,
     ],
   },
+  // ─── Estados de viaje (tickets de campo tipo NOC) ───────────────────────
+  // Se evalúan ANTES de TASK_DONE/TASK_START para evitar colisiones como
+  // "ya salí" (que podría matchear CHECK_OUT o NEW_TASK). Por diseño NO
+  // usamos "salgo"/"saliendo" a secas — requieren "para/hacia/al/a la ..."
+  // para desambiguar del CHECK_OUT.
+  TASK_TRAVELING: {
+    patterns: [
+      /voy\s+(?:en\s+)?camino\b/i,
+      /estoy\s+(?:en\s+)?camino\b/i,
+      /en\s+camino\b/i,
+      /(?:ya\s+)?estoy\s+yendo\b/i,
+      /voy\s+para\s+all[aá]\b/i,
+      /rumbo\s+(?:al|a\s+la|hacia)\b/i,
+      /en\s+ruta\b/i,
+      /me\s+dirij[oe]\b/i,
+      /yendo\s+(?:al|a\s+la|hacia)\b/i,
+      /saliendo\s+(?:para|hacia|al|a\s+la)\b/i,
+    ],
+  },
+  TASK_ON_SITE: {
+    // Importante: NO capturar "ya llegué" a secas ni "llegué" solo —
+    // esos los usa CHECK_IN al inicio de jornada. TASK_ON_SITE requiere
+    // referencia explícita al sitio del ticket/trabajo.
+    patterns: [
+      /\bllegu[eé]\s+al\s+(?:sitio|lugar|cliente|cuarto|punto|domicilio|edificio|nodo|poste)\b/i,
+      /\bllegu[eé]\s+a\s+la\s+(?:ubicaci[oó]n|sede|direcci[oó]n|estaci[oó]n|central|torre|oficina\s+del\s+cliente)\b/i,
+      /estoy\s+en\s+(?:el\s+sitio|el\s+lugar|la\s+ubicaci[oó]n|el\s+cliente|el\s+punto|el\s+nodo|el\s+poste)\b/i,
+      /\ben\s+(?:el\s+)?sitio\s+(?:ya|del\s+ticket|del\s+trabajo)?/i,
+      /llegu[eé]\s+al\s+(?:cliente|trabajo\s+del\s+ticket)\b/i,
+    ],
+  },
+
   TASK_DONE: {
     patterns: [
       // "ya terminé", "terminé", "termine", "terminar", "termina", "terminado", "listo", "completado", "hecho", "ya" (sola), etc.
@@ -270,6 +302,20 @@ function tryLocalNLP(text) {
     }
   }
 
+  // Check traveling / on_site (tickets de campo) — ANTES de TASK_DONE/TASK_START
+  // para que "llegué", "voy en camino", etc. se detecten como transiciones
+  // del ticket activo, no como finalización.
+  for (const p of LOCAL_PATTERNS.TASK_ON_SITE.patterns) {
+    if (p.test(cleaned)) {
+      return { intent: 'TASK_ON_SITE', confidence: 0.85, entities: {}, usedClaude: false };
+    }
+  }
+  for (const p of LOCAL_PATTERNS.TASK_TRAVELING.patterns) {
+    if (p.test(cleaned)) {
+      return { intent: 'TASK_TRAVELING', confidence: 0.85, entities: {}, usedClaude: false };
+    }
+  }
+
   // Check done (after verbal progress, so "casi termino" doesn't match here)
   for (const p of LOCAL_PATTERNS.TASK_DONE.patterns) {
     if (p.test(cleaned)) {
@@ -334,7 +380,7 @@ Tu trabajo es analizar mensajes de empleados (en español) y extraer la intenci�
 
 Responde SIEMPRE en JSON válido con esta estructura exacta:
 {
-  "intent": "TASK_DONE|TASK_PROGRESS|TASK_BLOCKED|TASK_START|TASK_PAUSE|TASK_SWITCH|TASK_CREATE|CHECK_IN|CHECK_OUT|TASK_LIST_REQUEST|GREETING|UNKNOWN",
+  "intent": "TASK_DONE|TASK_PROGRESS|TASK_BLOCKED|TASK_START|TASK_PAUSE|TASK_SWITCH|TASK_CREATE|TASK_TRAVELING|TASK_ON_SITE|CHECK_IN|CHECK_OUT|TASK_LIST_REQUEST|GREETING|UNKNOWN",
   "confidence": 0.0-1.0,
   "entities": {
     "task_title": "nombre EXACTO de la tarea del listado (si aplica) o nombre de nueva tarea",
@@ -366,8 +412,11 @@ REGLAS CRÍTICAS:
 - "avancé 50%", "llevo la mitad" → TASK_PROGRESS con progress_percent
 - "10% más", "avancé un 20%", "le sumé 15%" → TASK_PROGRESS con progress_percent e is_relative: true
 - "no puedo avanzar porque..." → TASK_BLOCKED
-- "me reporto", "ya llegué" → CHECK_IN
+- "me reporto", "ya llegué" (al inicio del turno, antes del check-in) → CHECK_IN
 - "estoy saliendo", "me voy", "terminé mi turno" → CHECK_OUT
+- "voy en camino al cliente", "rumbo al sitio", "saliendo hacia el nodo", "en ruta" → TASK_TRAVELING (el técnico se mueve hacia el lugar del ticket; NO CHECK_IN)
+- "llegué al sitio", "estoy en el cliente", "en el lugar del ticket" → TASK_ON_SITE (ya está en el lugar del trabajo pero aún no inició)
+- Atención: TASK_TRAVELING/TASK_ON_SITE aplican SOLO a empleados que ya hicieron check-in y tienen ticket activo. Si el mensaje es ambiguo ("ya llegué") y el empleado NO tiene tarea in_progress, prefiere CHECK_IN.
 - Números aislados como "50" o "80" → porcentaje de avance
 - Mensajes ambiguos o muy cortos (ej: "bien", "normal") → UNKNOWN
 

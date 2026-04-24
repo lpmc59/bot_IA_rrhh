@@ -99,7 +99,7 @@ async function getExternalTask(taskId) {
 
   const instances = await query(
     `SELECT instance_id, work_date, status, progress_percent,
-            started_at, completed_at, last_update_at
+            started_at, completed_at, last_update_at, blocked_reason
      FROM app.task_instances
      WHERE task_id = $1
      ORDER BY work_date ASC`,
@@ -114,13 +114,45 @@ async function getExternalTask(taskId) {
      FROM app.attachments WHERE task_id = $1 ORDER BY created_at DESC`,
     [taskId]
   );
+  // Timeline de eventos/updates a través de todas las instances del task.
+  // Útil para que optel-redes muestre histórico de avances/notas/transiciones.
+  const updates = await query(
+    `SELECT tu.update_id, tu.instance_id, tu.employee_id, tu.update_type,
+            tu.progress_percent, tu.note_text, tu.created_at
+     FROM app.task_updates tu
+     JOIN app.task_instances ti ON ti.instance_id = tu.instance_id
+     WHERE ti.task_id = $1
+     ORDER BY tu.created_at DESC`,
+    [taskId]
+  );
 
   return {
     task: t.rows[0],
     instances: instances.rows,
     scheduled_dates: scheduled.rows.map(r => r.work_date),
     attachments: attachments.rows,
+    updates: updates.rows,
   };
+}
+
+// ─── Resolver la task_instance activa para un task (helper) ─────────────────
+// Cuando el caller externo (optel-redes) identifica la tarea por task_id,
+// necesitamos encontrar la task_instance relevante:
+//   - Preferencia: la más reciente con status != ('done','canceled')
+//   - Fallback:    la más reciente cualquiera (último día trabajado)
+async function getActiveInstanceForTask(taskId) {
+  const r = await query(
+    `SELECT instance_id, employee_id, status, work_date
+     FROM app.task_instances
+     WHERE task_id = $1
+     ORDER BY
+       CASE WHEN status NOT IN ('done','canceled') THEN 0 ELSE 1 END,
+       work_date DESC,
+       last_update_at DESC NULLS LAST
+     LIMIT 1`,
+    [taskId]
+  );
+  return r.rows[0] || null;
 }
 
 // ─── Validación del empleado destino ────────────────────────────────────────
@@ -496,6 +528,190 @@ async function notifyTaskUpdated({ task, employeeId, changes = [] }) {
   return { sent: true, target };
 }
 
+// ─── SET STATUS (optel-redes cambia el estado del ticket) ───────────────────
+
+const STATUS_EMOJI = {
+  planned: '📋', traveling: '🚗', on_site: '📍',
+  in_progress: '▶️', done: '✅', blocked: '🚫', canceled: '❌',
+};
+const STATUS_LABEL = {
+  planned: 'pendiente', traveling: 'en camino', on_site: 'en el sitio',
+  in_progress: 'en progreso', done: 'completada', blocked: 'bloqueada', canceled: 'cancelada',
+};
+
+// Notificaciones por status: defaults según conversación con el equipo.
+// Caller puede forzar con `notify: true/false` en el request.
+const NOTIFY_DEFAULTS = {
+  traveling: false, on_site: false, in_progress: false,
+  done: true, blocked: true, canceled: true, planned: false,
+};
+
+async function setExternalTaskStatus(taskId, { status, note = null, notify = null, instanceId = null }) {
+  // Lazy require para evitar circular imports
+  const taskService = require('./taskService');
+
+  // Validar task existe y status válido
+  const t = await query(`SELECT task_id, title, employee_id FROM app.tasks WHERE task_id = $1`, [taskId]);
+  if (!t.rows[0]) throw new ExternalTaskError('task_not_found', `Task ${taskId} no existe`, 404);
+  const task = t.rows[0];
+
+  // Localizar la task_instance sobre la que actuamos
+  let target;
+  if (instanceId) {
+    const r = await query(
+      `SELECT instance_id, employee_id, status
+       FROM app.task_instances
+       WHERE instance_id = $1 AND task_id = $2`,
+      [instanceId, taskId]
+    );
+    target = r.rows[0];
+    if (!target) {
+      throw new ExternalTaskError('instance_not_found',
+        `instance ${instanceId} no pertenece al task ${taskId}`, 404);
+    }
+  } else {
+    target = await getActiveInstanceForTask(taskId);
+    if (!target) {
+      throw new ExternalTaskError('no_instance_available',
+        `Task ${taskId} no tiene instances materializadas aún. Seteá el status cuando haya instance (ej. cuando la fecha llegue).`, 409);
+    }
+  }
+
+  // Delegar la transición al core del taskService (valida máquina de estados)
+  let result;
+  try {
+    result = await taskService.setTaskInstanceStatus(target.instance_id, status, {
+      employeeId: target.employee_id,
+      note,
+    });
+  } catch (err) {
+    if (err instanceof taskService.TaskStatusError) {
+      // Re-lanzar como ExternalTaskError para respuesta HTTP coherente
+      throw new ExternalTaskError(err.code, err.message, err.httpStatus);
+    }
+    throw err;
+  }
+
+  // Decidir si notificar por Telegram
+  const shouldNotify = notify === null ? (NOTIFY_DEFAULTS[status] ?? false) : !!notify;
+  let notified = { sent: false, reason: 'not_requested' };
+  if (shouldNotify && result.changed) {
+    try {
+      notified = await _notifyStatusChange({
+        task, status, note, employeeId: target.employee_id,
+      });
+    } catch (err) {
+      logger.warn('Notify on setStatus failed', { err: err.message });
+      notified = { sent: false, reason: err.message };
+    }
+  } else if (!result.changed) {
+    notified = { sent: false, reason: 'no_change' };
+  } else {
+    notified = { sent: false, reason: 'notify_opt_out' };
+  }
+
+  return {
+    task_id: taskId,
+    instance_id: target.instance_id,
+    status: result.status,
+    previous_status: result.previous || target.status,
+    changed: result.changed,
+    notified: notified.sent,
+    notified_reason: notified.reason,
+  };
+}
+
+async function _notifyStatusChange({ task, status, note, employeeId }) {
+  const empRes = await query(
+    `SELECT telegram_id, phone_e164 FROM app.employees WHERE employee_id = $1`,
+    [employeeId]
+  );
+  const e = empRes.rows[0];
+  if (!e) return { sent: false, reason: 'no_employee' };
+  const target = e.telegram_id || e.phone_e164;
+  if (!target) return { sent: false, reason: 'no_contact' };
+
+  const emoji = STATUS_EMOJI[status] || '📝';
+  const label = STATUS_LABEL[status] || status;
+  const lines = [
+    `${emoji} Estado actualizado: *${label}*`,
+    task.title,
+  ];
+  if (note) lines.push(`\n${note}`);
+  await outboxService.queueMessage(target, lines.join('\n'));
+  return { sent: true, reason: 'sent' };
+}
+
+// ─── ADD NOTE sin cambio de estado ──────────────────────────────────────────
+
+async function addExternalTaskNote(taskId, { note, notify = false, instanceId = null }) {
+  if (!note || !note.trim()) {
+    throw new ExternalTaskError('note_required', 'note es requerido', 422);
+  }
+
+  const t = await query(`SELECT task_id, title, employee_id FROM app.tasks WHERE task_id = $1`, [taskId]);
+  if (!t.rows[0]) throw new ExternalTaskError('task_not_found', `Task ${taskId} no existe`, 404);
+  const task = t.rows[0];
+
+  // Localizar instance
+  let target;
+  if (instanceId) {
+    const r = await query(
+      `SELECT instance_id, employee_id FROM app.task_instances
+       WHERE instance_id = $1 AND task_id = $2`,
+      [instanceId, taskId]
+    );
+    target = r.rows[0];
+    if (!target) throw new ExternalTaskError('instance_not_found', `instance ${instanceId} no pertenece al task`, 404);
+  } else {
+    target = await getActiveInstanceForTask(taskId);
+    if (!target) throw new ExternalTaskError('no_instance_available', 'Sin instance activa', 409);
+  }
+
+  const r = await query(
+    `INSERT INTO app.task_updates (instance_id, employee_id, update_type, note_text)
+     VALUES ($1, $2, 'NOTE', $3)
+     RETURNING update_id, created_at`,
+    [target.instance_id, target.employee_id, note.trim()]
+  );
+
+  // Update de last_update_at para que reportes "actividad reciente" lo vean
+  await query(
+    `UPDATE app.task_instances SET last_update_at = NOW() WHERE instance_id = $1`,
+    [target.instance_id]
+  );
+
+  let notified = { sent: false, reason: 'not_requested' };
+  if (notify) {
+    try {
+      const empRes = await query(
+        `SELECT telegram_id, phone_e164 FROM app.employees WHERE employee_id = $1`,
+        [target.employee_id]
+      );
+      const e = empRes.rows[0];
+      const chan = e?.telegram_id || e?.phone_e164;
+      if (chan) {
+        await outboxService.queueMessage(chan,
+          `📝 *Nota agregada al ticket*\n${task.title}\n\n${note.trim()}`);
+        notified = { sent: true, reason: 'sent' };
+      } else {
+        notified = { sent: false, reason: 'no_contact' };
+      }
+    } catch (err) {
+      notified = { sent: false, reason: err.message };
+    }
+  }
+
+  return {
+    task_id: taskId,
+    instance_id: target.instance_id,
+    update_id: r.rows[0].update_id,
+    created_at: r.rows[0].created_at,
+    notified: notified.sent,
+    notified_reason: notified.reason,
+  };
+}
+
 // ─── Export ─────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -504,7 +720,10 @@ module.exports = {
   updateExternalTask,
   cancelExternalTask,
   attachExternalResource,
+  setExternalTaskStatus,
+  addExternalTaskNote,
   getExternalTask,
+  getActiveInstanceForTask,
   findExternalTaskByRef,
   notifyTaskAssigned,
   notifyTaskCanceled,

@@ -490,6 +490,196 @@ async function restartTask(instanceId, employeeId) {
   }
 }
 
+// ─── Cambio de estado genérico (traveling, on_site, in_progress, done, blocked, canceled) ─
+//
+// Función unificada que reemplaza/complementa markTaskDone/markTaskBlocked/startTask
+// cuando el trigger viene de un sistema externo (optel-redes) o de estados nuevos
+// (traveling / on_site) que no tienen función dedicada.
+//
+// Política de transiciones (PERMISIVA):
+//   - canceled  → terminal, rechaza cualquier cambio (HTTP 409)
+//   - done      → solo permite in_progress (reabrir). Otras rechazan (HTTP 409)
+//   - cualquier otra → cualquier otra (incluye saltos como planned→on_site directo)
+//
+// Efectos colaterales según newStatus:
+//   - traveling / on_site: NO toca time_log (tiempo de viaje no cuenta como trabajo)
+//   - in_progress:         startTimeLog (si no hay log abierto); started_at=COALESCE(prev, NOW())
+//   - done:                stopTimeLog; completed_at=NOW(); progress=100
+//   - blocked:             stopTimeLog; requiere note (se guarda en blocked_reason)
+//   - canceled:            stopTimeLog
+//   - planned:             (reset — uso raro; permisivo)
+//
+// Siempre registra un update en task_updates con update_type mapeado:
+//   traveling→TRAVELING, on_site→ON_SITE, in_progress→START,
+//   done→DONE, blocked→BLOCKED, canceled→CANCELED, planned→NOTE
+//
+const ALLOWED_STATUSES = ['planned', 'traveling', 'on_site', 'in_progress', 'done', 'blocked', 'canceled'];
+const STATUS_TO_UPDATE_TYPE = {
+  planned:     'NOTE',
+  traveling:   'TRAVELING',
+  on_site:     'ON_SITE',
+  in_progress: 'START',
+  done:        'DONE',
+  blocked:     'BLOCKED',
+  canceled:    'CANCELED',
+};
+
+class TaskStatusError extends Error {
+  constructor(code, message, httpStatus = 409) {
+    super(message);
+    this.code = code;
+    this.httpStatus = httpStatus;
+  }
+}
+
+async function setTaskInstanceStatus(instanceId, newStatus, opts = {}) {
+  const { employeeId = null, messageId = null, note = null, progressPercent = null } = opts;
+
+  if (!ALLOWED_STATUSES.includes(newStatus)) {
+    throw new TaskStatusError('invalid_status',
+      `status '${newStatus}' no es válido. Permitidos: ${ALLOWED_STATUSES.join(', ')}`, 422);
+  }
+
+  // blocked requiere note — es el texto del bloqueo
+  if (newStatus === 'blocked' && !note) {
+    throw new TaskStatusError('note_required_for_blocked',
+      'Para status=blocked se requiere note con el motivo del bloqueo', 422);
+  }
+
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+
+    // Leer estado actual
+    const cur = await client.query(
+      `SELECT instance_id, employee_id, status, started_at, completed_at,
+              progress_percent, task_id
+       FROM task_instances WHERE instance_id = $1 FOR UPDATE`,
+      [instanceId]
+    );
+    if (!cur.rows[0]) {
+      throw new TaskStatusError('instance_not_found',
+        `task_instance ${instanceId} no existe`, 404);
+    }
+    const prev = cur.rows[0];
+
+    // Transiciones rechazadas (política permisiva: solo 2 reglas)
+    if (prev.status === 'canceled') {
+      throw new TaskStatusError('cannot_change_canceled',
+        'Tarea cancelada — no se puede cambiar de estado. Creá una nueva.', 409);
+    }
+    if (prev.status === 'done' && newStatus !== 'in_progress' && newStatus !== 'done') {
+      throw new TaskStatusError('cannot_change_done',
+        `Tarea done — solo se puede reabrir a in_progress. Intento: '${newStatus}'`, 409);
+    }
+
+    // Si el status no cambia, hacemos solo update de last_update_at + note (si hay)
+    if (prev.status === newStatus) {
+      await client.query(
+        `UPDATE task_instances SET last_update_at = NOW() WHERE instance_id = $1`,
+        [instanceId]
+      );
+      if (note) {
+        await client.query(
+          `INSERT INTO task_updates (instance_id, employee_id, message_id, update_type, note_text)
+           VALUES ($1, $2, $3, 'NOTE', $4)`,
+          [instanceId, employeeId || prev.employee_id, messageId, note]
+        );
+      }
+      await client.query('COMMIT');
+      return { instance_id: instanceId, status: prev.status, changed: false };
+    }
+
+    // Armar el UPDATE de task_instances según newStatus
+    const setFragments = ['status = $2', 'last_update_at = NOW()'];
+    const values = [instanceId, newStatus];
+    let i = 3;
+
+    if (newStatus === 'in_progress') {
+      // started_at si es la primera vez que se inicia
+      setFragments.push(`started_at = COALESCE(started_at, NOW())`);
+      // si veníamos de done/blocked, limpiar completed_at y blocked_reason
+      if (prev.status === 'done' || prev.status === 'blocked') {
+        setFragments.push(`completed_at = NULL`, `blocked_reason = NULL`);
+        // reset progress si reabrimos un done
+        if (prev.status === 'done' && progressPercent === null) {
+          setFragments.push(`progress_percent = 0`);
+        }
+      }
+    } else if (newStatus === 'done') {
+      setFragments.push(`completed_at = NOW()`, `progress_percent = 100`);
+    } else if (newStatus === 'blocked') {
+      setFragments.push(`blocked_reason = $${i++}`);
+      values.push(note);
+    } else if (newStatus === 'canceled') {
+      // no hay cambios adicionales en columnas, solo status
+    }
+
+    if (progressPercent !== null && newStatus !== 'done') {
+      setFragments.push(`progress_percent = $${i++}`);
+      values.push(progressPercent);
+    }
+
+    await client.query(
+      `UPDATE task_instances SET ${setFragments.join(', ')} WHERE instance_id = $1`,
+      values
+    );
+
+    // Registrar update en task_updates
+    const updateType = STATUS_TO_UPDATE_TYPE[newStatus];
+    await client.query(
+      `INSERT INTO task_updates (instance_id, employee_id, message_id, update_type,
+                                  progress_percent, note_text)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        instanceId,
+        employeeId || prev.employee_id,
+        messageId,
+        updateType,
+        newStatus === 'done' ? 100 : progressPercent,
+        note,
+      ]
+    );
+
+    // Time tracking según status destino
+    if (newStatus === 'in_progress') {
+      await startTimeLog(instanceId, employeeId || prev.employee_id, client);
+    } else if (['done', 'blocked', 'canceled'].includes(newStatus)) {
+      await stopTimeLog(employeeId || prev.employee_id, client);
+    }
+    // traveling, on_site, planned: NO tocamos time_log
+
+    // Propagar cambio a tarea madre (backlog parent) cuando corresponda
+    if (prev.task_id) {
+      const propAction =
+        newStatus === 'in_progress' ? 'start' :
+        newStatus === 'done'        ? 'done' :
+        newStatus === 'blocked'     ? 'blocked' :
+        null; // traveling/on_site/canceled no propagan al parent por ahora
+      if (propAction) {
+        await propagateToParentTask(instanceId, {
+          action: propAction, blockedReason: note,
+        }, client);
+      }
+    }
+
+    await client.query('COMMIT');
+    logger.info('setTaskInstanceStatus OK', {
+      instanceId, from: prev.status, to: newStatus, employeeId,
+    });
+    return { instance_id: instanceId, status: newStatus, changed: true, previous: prev.status };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    if (err instanceof TaskStatusError) throw err;
+    logger.error('setTaskInstanceStatus failed', {
+      instanceId, newStatus, err: err.message,
+    });
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 async function createAdHocTask(employeeId, workDate, title, description, shiftId, standardMinutes) {
   const client = await getClient();
   try {
@@ -1467,6 +1657,8 @@ module.exports = {
   markTaskBlocked,
   startTask,
   restartTask,
+  setTaskInstanceStatus,
+  TaskStatusError,
   createAdHocTask,
   generateDailyTaskInstances,
   formatTaskList,

@@ -469,6 +469,16 @@ async function processInboundMessage({ phone, openclawUserId, telegramId, text, 
       ({ reply, instanceId } = await handleTaskStart(employee, workDate, messageId, nlpResult, shift, session));
       break;
 
+    case 'TASK_TRAVELING':
+      ({ reply, instanceId } = await handleTaskTravelOrOnSite(
+        employee, workDate, activeTask, messageId, 'traveling'));
+      break;
+
+    case 'TASK_ON_SITE':
+      ({ reply, instanceId } = await handleTaskTravelOrOnSite(
+        employee, workDate, activeTask, messageId, 'on_site'));
+      break;
+
     case 'ASSIGN_TASK': {
       const isMgr = ['manager', 'admin', 'general_supervisor', 'supervisor_auditor'].includes(employee.role);
       if (!isMgr) {
@@ -1894,6 +1904,59 @@ async function handleTaskProgress(employee, workDate, activeTask, messageId, nlp
   });
 
   return { reply: msg, instanceId: null };
+}
+
+// ─── Traveling / On-Site (tickets de campo tipo NOC) ──────────────────────
+// Transiciona el task_instance activo a 'traveling' o 'on_site'.
+// Útil para técnicos que salen a sitio — el supervisor o el sistema NOC
+// (optel-redes) ve el avance del ticket en tiempo real.
+async function handleTaskTravelOrOnSite(employee, workDate, activeTask, messageId, newStatus) {
+  if (!activeTask) {
+    // Si no hay tarea activa, buscar la última "asignada" (planned/traveling/on_site)
+    // para dejar mover su estado. Sino, advertir.
+    const candidates = await taskService.getInProgressTasks?.(employee.employee_id, workDate) || [];
+    if (candidates.length === 0) {
+      // Fallback: buscar cualquier instance de hoy que no esté done/canceled
+      const all = await taskService.getTodayTasksForEmployee(employee.employee_id, workDate);
+      const eligible = (all || []).filter(t =>
+        ['planned', 'traveling', 'on_site'].includes(t.status)
+      );
+      if (eligible.length === 0) {
+        return {
+          reply: `No tenés ninguna tarea asignada para marcar como "${newStatus === 'traveling' ? 'en camino' : 'en el sitio'}". Si querés iniciar una tarea, decí "empiezo con la N".`,
+          instanceId: null,
+        };
+      }
+      activeTask = eligible[0]; // La primera por display_order
+    } else {
+      activeTask = candidates[0];
+    }
+  }
+
+  try {
+    await taskService.setTaskInstanceStatus(activeTask.instance_id, newStatus, {
+      employeeId: employee.employee_id,
+      messageId,
+    });
+  } catch (err) {
+    logger.warn('setTaskInstanceStatus (telegram) failed', {
+      employeeId: employee.employee_id,
+      instanceId: activeTask.instance_id,
+      targetStatus: newStatus,
+      err: err.message,
+    });
+    return {
+      reply: `No pude cambiar el estado a "${newStatus}". ${err.message}`,
+      instanceId: activeTask.instance_id,
+    };
+  }
+
+  const title = activeTask.title || 'tu tarea';
+  const msg = newStatus === 'traveling'
+    ? `🚗 Anotado — en camino a *${title}*. Avisame cuando llegues.`
+    : `📍 Perfecto, estás en el sitio de *${title}*. Decí "empiezo" cuando arranques el trabajo.`;
+
+  return { reply: msg, instanceId: activeTask.instance_id };
 }
 
 async function handleTaskBlocked(employee, workDate, activeTask, messageId, nlpResult, session) {

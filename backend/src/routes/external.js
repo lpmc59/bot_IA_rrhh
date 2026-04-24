@@ -229,4 +229,51 @@ router.post('/tasks/:task_id/attachments', async (req, res) => {
   }
 });
 
+// ─── PATCH /api/external/tasks/:task_id/status ─────────────────────────────
+// Body: { status, note?, notify?, instance_id? }
+// status ∈ planned|traveling|on_site|in_progress|done|blocked|canceled
+// - blocked requiere note (motivo del bloqueo)
+// - instance_id: opcional, por default se usa la instance activa del task
+// - notify: opt-in. Defaults según status (true para done/blocked/canceled,
+//           false para traveling/on_site/in_progress)
+
+router.patch('/tasks/:task_id/status', async (req, res) => {
+  const body = req.body || {};
+  if (!body.status) {
+    return res.status(422).json({ ok: false, error: 'status_required',
+      message: 'status es requerido en el body' });
+  }
+  try {
+    const result = await ext.setExternalTaskStatus(req.params.task_id, {
+      status:     body.status,
+      note:       body.note,
+      notify:     body.notify === undefined ? null : body.notify,
+      instanceId: body.instance_id,
+    });
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// ─── POST /api/external/tasks/:task_id/notes ───────────────────────────────
+// Body: { note, notify?, instance_id? }
+// Agrega una nota al ticket sin cambiar el status. Útil para que el NOC
+// anote observaciones visibles en get_ticket().updates y opcionalmente
+// notificar al empleado.
+
+router.post('/tasks/:task_id/notes', async (req, res) => {
+  const body = req.body || {};
+  try {
+    const result = await ext.addExternalTaskNote(req.params.task_id, {
+      note:       body.note,
+      notify:     body.notify === true,
+      instanceId: body.instance_id,
+    });
+    return res.status(201).json({ ok: true, ...result });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
 module.exports = router;
