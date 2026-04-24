@@ -241,21 +241,38 @@ async function getTodayTasksForEmployee(employeeId, workDate, shiftId) {
   return res.rows;
 }
 
+// Estados "activos" — el empleado tiene la tarea abierta en algún grado.
+// Incluimos traveling y on_site (nuevos en mig 019) además del clásico in_progress:
+// si el empleado venía manejando esa tarea y dice "ya terminé" o "50%", se refiere
+// a ella aunque técnicamente no haya empezado el trabajo real (todavía está on_site).
+// Ordenadas por "proximidad al trabajo real": in_progress (máxima) > on_site > traveling.
+const ACTIVE_STATUSES = ['in_progress', 'on_site', 'traveling'];
+const ACTIVE_STATUS_ORDER = `
+  CASE ti.status
+    WHEN 'in_progress' THEN 0
+    WHEN 'on_site'     THEN 1
+    WHEN 'traveling'   THEN 2
+    ELSE 3
+  END
+`;
+
 async function getActiveTask(employeeId, workDate) {
   const res = await query(
     `SELECT ti.*
      FROM task_instances ti
      WHERE ti.employee_id = $1
        AND ti.work_date = $2
-       AND ti.status = 'in_progress'
-     ORDER BY ti.started_at DESC
+       AND ti.status IN ('in_progress', 'on_site', 'traveling')
+     ORDER BY ${ACTIVE_STATUS_ORDER},
+              ti.last_update_at DESC NULLS LAST,
+              ti.started_at DESC NULLS LAST
      LIMIT 1`,
     [employeeId, workDate]
   );
   return res.rows[0] || null;
 }
 
-// Devuelve TODAS las tareas in_progress (no solo la más reciente).
+// Devuelve TODAS las tareas "activas" (in_progress, on_site, traveling).
 // Útil para detectar el caso "el empleado tiene varias tareas abiertas en paralelo"
 // y pedirle que desambigüe antes de marcar alguna como DONE o iniciar otra nueva.
 async function getInProgressTasks(employeeId, workDate) {
@@ -264,8 +281,10 @@ async function getInProgressTasks(employeeId, workDate) {
      FROM task_instances ti
      WHERE ti.employee_id = $1
        AND ti.work_date = $2
-       AND ti.status = 'in_progress'
-     ORDER BY ti.started_at DESC`,
+       AND ti.status IN ('in_progress', 'on_site', 'traveling')
+     ORDER BY ${ACTIVE_STATUS_ORDER},
+              ti.last_update_at DESC NULLS LAST,
+              ti.started_at DESC NULLS LAST`,
     [employeeId, workDate]
   );
   return res.rows;
@@ -277,12 +296,21 @@ async function findTaskByFuzzyTitle(employeeId, workDate, searchText) {
      FROM task_instances ti
      WHERE ti.employee_id = $1
        AND ti.work_date = $2
-       AND ti.status IN ('planned', 'in_progress', 'blocked')
+       AND ti.status IN ('planned', 'in_progress', 'traveling', 'on_site', 'blocked')
        AND (
          LOWER(ti.title) LIKE LOWER($3)
          OR LOWER(ti.description) LIKE LOWER($3)
        )
-     ORDER BY ti.status = 'in_progress' DESC, ti.created_at ASC
+     ORDER BY
+       CASE ti.status
+         WHEN 'in_progress' THEN 0
+         WHEN 'on_site'     THEN 1
+         WHEN 'traveling'   THEN 2
+         WHEN 'planned'     THEN 3
+         WHEN 'blocked'     THEN 4
+         ELSE 5
+       END,
+       ti.created_at ASC
      LIMIT 1`,
     [employeeId, workDate, `%${searchText}%`]
   );
