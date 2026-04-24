@@ -1912,24 +1912,37 @@ async function handleTaskProgress(employee, workDate, activeTask, messageId, nlp
 // (optel-redes) ve el avance del ticket en tiempo real.
 async function handleTaskTravelOrOnSite(employee, workDate, activeTask, messageId, newStatus) {
   if (!activeTask) {
-    // Si no hay tarea activa, buscar la última "asignada" (planned/traveling/on_site)
-    // para dejar mover su estado. Sino, advertir.
-    const candidates = await taskService.getInProgressTasks?.(employee.employee_id, workDate) || [];
-    if (candidates.length === 0) {
-      // Fallback: buscar cualquier instance de hoy que no esté done/canceled
-      const all = await taskService.getTodayTasksForEmployee(employee.employee_id, workDate);
-      const eligible = (all || []).filter(t =>
-        ['planned', 'traveling', 'on_site'].includes(t.status)
-      );
-      if (eligible.length === 0) {
+    // Priorizar la tarea que el empleado ya está manejando (estados activos:
+    // in_progress, traveling, on_site) sobre las planned. Esto es crítico
+    // porque, por ejemplo, tras decir "voy en camino" la tarea pasa de
+    // in_progress → traveling. Si el empleado dice "llegué al sitio",
+    // debemos seguir operando sobre ESA tarea (ahora traveling), no sobre
+    // la primera planned por display_order.
+    const all = await taskService.getTodayTasksForEmployee(employee.employee_id, workDate);
+    const ACTIVE = ['in_progress', 'traveling', 'on_site'];
+    const active = (all || [])
+      .filter(t => ACTIVE.includes(t.status))
+      .sort((a, b) => {
+        // Más recientemente actualizada primero
+        const la = a.last_update_at || a.started_at || a.created_at || '';
+        const lb = b.last_update_at || b.started_at || b.created_at || '';
+        return String(lb).localeCompare(String(la));
+      });
+
+    if (active.length > 0) {
+      activeTask = active[0];
+    } else {
+      // Sin tarea activa → usar la primera planned (display_order)
+      const planned = (all || [])
+        .filter(t => t.status === 'planned')
+        .sort((a, b) => (a.display_order || 0) - (b.display_order || 0));
+      if (planned.length === 0) {
         return {
           reply: `No tenés ninguna tarea asignada para marcar como "${newStatus === 'traveling' ? 'en camino' : 'en el sitio'}". Si querés iniciar una tarea, decí "empiezo con la N".`,
           instanceId: null,
         };
       }
-      activeTask = eligible[0]; // La primera por display_order
-    } else {
-      activeTask = candidates[0];
+      activeTask = planned[0];
     }
   }
 
