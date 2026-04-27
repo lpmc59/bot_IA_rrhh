@@ -29,6 +29,20 @@ const LOCAL_PATTERNS = {
       /(estoy\s+saliendo|me\s+voy|ya\s+me\s+voy|termin[eéo]\s+(?:mi\s+)?(?:turno|jornada|d[ií]a)|fin\s+de\s+(?:turno|jornada)|salgo\s+del\s+trabajo|ya\s+sal[ií]|me\s+retiro|finalic[eé]\s+(?:mi\s+)?(?:turno|jornada)|hora\s+de\s+(?:salida|irme)|ya\s+termin[eé]\s+(?:mi\s+)?(?:turno|jornada))/i,
     ],
   },
+  // ─── TASK_START por número (frase corta, alta confianza) ────────────────
+  // Estos patterns capturan frases tipo "empiezo con la 1", "voy con la dos",
+  // "sigo con la 3" SIN ambigüedad. Se evalúan ANTES de NEW_TASK para que
+  // "empiezo con la 1" no caiga en TASK_CREATE con title="1".
+  // Devuelven directamente intent=TASK_START con task_number en entities.
+  TASK_START_BY_NUMBER: {
+    patterns: [
+      // Numero arábigo: "empiezo 1", "empiezo la 2", "empiezo con la 3"
+      /^(?:empiezo|inicio|comienzo|arranco|me\s+pongo|voy\s+con|sigo\s+con|seguir\s+con|continuar\s+con|continuo\s+con|paso\s+a\s+la|hago\s+la)\s+(?:con\s+)?(?:a\s+)?(?:la|el|los|las|tarea)?\s*(\d{1,2})\s*$/i,
+      // Numero en palabra (1-10): "empiezo con la uno", "voy con la dos"
+      /^(?:empiezo|inicio|comienzo|arranco|me\s+pongo|voy\s+con|sigo\s+con|seguir\s+con|continuar\s+con|continuo\s+con|paso\s+a\s+la|hago\s+la)\s+(?:con\s+)?(?:a\s+)?(?:la|el|los|las|tarea)?\s*(uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s*$/i,
+    ],
+  },
+
   // ─── Estados de viaje (tickets de campo tipo NOC) ───────────────────────
   // Se evalúan ANTES de TASK_DONE/TASK_START para evitar colisiones como
   // "ya salí" (que podría matchear CHECK_OUT o NEW_TASK). Por diseño NO
@@ -336,6 +350,30 @@ function tryLocalNLP(text) {
     }
   }
 
+  // Check TASK_START by number FIRST (antes de NEW_TASK):
+  // "empiezo con la 1", "voy con la 2", "sigo con la tres" → TASK_START directo.
+  // Esto evita que esas frases cortas caigan en NEW_TASK (con title="1") y después
+  // tengan que ir a Claude para resolverse — son zero-cost matches.
+  const NUMBER_WORDS = {
+    uno: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5,
+    seis: 6, siete: 7, ocho: 8, nueve: 9, diez: 10,
+  };
+  for (const p of LOCAL_PATTERNS.TASK_START_BY_NUMBER.patterns) {
+    const m = cleaned.match(p);
+    if (m) {
+      const tok = m[1].toLowerCase();
+      const taskNumber = /^\d+$/.test(tok) ? parseInt(tok, 10) : NUMBER_WORDS[tok];
+      if (taskNumber && taskNumber >= 1 && taskNumber <= 99) {
+        return {
+          intent: 'TASK_START',
+          confidence: 0.95,
+          entities: { task_number: taskNumber },
+          usedClaude: false,
+        };
+      }
+    }
+  }
+
   // Check new task
   for (const p of LOCAL_PATTERNS.NEW_TASK.patterns) {
     if (p.test(cleaned)) {
@@ -348,6 +386,25 @@ function tryLocalNLP(text) {
       // Strip leftover action verbs: "iniciar limpieza" → "limpieza"
       if (title) {
         title = title.replace(/^(?:in[ií]ciar|hacer|realizar|empezar|comenzar|arrancar|terminar|completar|continuar)\s+/i, '').trim();
+      }
+      // Si el "title" extraído es solo un número o "la N" / "la uno",
+      // NO es una nueva tarea sino una referencia a tarea existente.
+      // Reinterpretamos como TASK_START con task_number. (Backstop por
+      // si el pattern TASK_START_BY_NUMBER no capturó la frase exacta.)
+      if (title) {
+        const refMatch = title.match(/^(?:la|el|los|las)?\s*(\d{1,2}|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s*$/i);
+        if (refMatch) {
+          const tok = refMatch[1].toLowerCase();
+          const n = /^\d+$/.test(tok) ? parseInt(tok, 10) : NUMBER_WORDS[tok];
+          if (n && n >= 1 && n <= 99) {
+            return {
+              intent: 'TASK_START',
+              confidence: 0.9,
+              entities: { task_number: n },
+              usedClaude: false,
+            };
+          }
+        }
       }
       return {
         intent: 'TASK_CREATE',
@@ -497,49 +554,33 @@ async function analyzeWithClaude(text, employeeContext) {
 
 // ─── Main NLP pipeline ──────────────────────────────────────────────────────
 
-// Intents donde el contexto de tareas en progreso importa para desambiguar
-const CONTEXT_SENSITIVE_INTENTS = new Set(['TASK_DONE', 'TASK_PROGRESS', 'TASK_START', 'TASK_BLOCKED', 'TASK_CREATE']);
+// Política de costo: el NLP local resuelve TODO lo que pueda con regex
+// (gratis, instantáneo). Solo se invoca a Claude (Haiku 4.5, costoso) si:
+//   - el regex local no matcheó nada con confidence ≥0.8
+//   - Y la búsqueda en keyword_dictionary tampoco ayudó
+//
+// La desambiguación de "varias tareas in_progress + mensaje sin referencia
+// explícita" se hace en los HANDLERS (handleTaskDone, handleTaskStart, etc.)
+// vía estados WAITING_TASK_PICK / WAITING_SWITCH_CONFIRM, no via Claude.
+// Eso es zero-cost y mejor UX (el empleado decide, no el modelo).
 
 async function analyze(text, employeeContext) {
-  // Calcular si el contexto del empleado es "ambiguo":
-  // tiene múltiples tareas in_progress Y el mensaje NO contiene una referencia clara
-  // (número o nombre largo). Si es ambiguo, NO confiamos en el NLP local aunque diga 0.9 —
-  // dejamos que Claude vea la lista completa y decida.
-  const inProgressCount = (employeeContext?.todayTasks || [])
-    .filter(t => t.status === 'in_progress').length;
-  const hasExplicitRef = /\d+|tarea\s+\w+|la\s+(primera|segunda|tercera|[uú]ltima)/i.test(text);
-  const contextIsAmbiguous = inProgressCount > 1 && !hasExplicitRef;
-
-  // Step 1: Try local patterns first (no cost)
+  // Step 1: Try local patterns first (no cost, instantaneous)
   const localResult = tryLocalNLP(text);
   if (localResult && localResult.confidence >= 0.8) {
-    // Si el contexto es ambiguo Y el intent local depende del contexto de tareas,
-    // consultar Claude como "segunda opinión" para que vea la lista y decida mejor.
-    if (contextIsAmbiguous && CONTEXT_SENSITIVE_INTENTS.has(localResult.intent)) {
-      logger.info('NLP: Contexto ambiguo (múltiples tareas in_progress), consultando Claude', {
-        localIntent: localResult.intent, inProgressCount,
-      });
-      const claudeResult = await analyzeWithClaude(text, employeeContext);
-      // Solo usar Claude si devuelve algo útil; si falla, caer a local
-      if (claudeResult && claudeResult.intent !== 'UNKNOWN' && !claudeResult.error) {
-        return claudeResult;
-      }
-      logger.info('NLP: Claude no ayudó, usando resultado local', { intent: localResult.intent });
-      return localResult;
-    }
     logger.info('NLP: Local match', { intent: localResult.intent, confidence: localResult.confidence });
     return localResult;
   }
 
-  // Step 2: Also check keyword_dictionary from DB
+  // Step 2: Try keyword_dictionary from DB (also zero LLM cost)
   const dbResult = await tryDatabaseKeywords(text);
-  if (dbResult && dbResult.confidence >= 0.8 && !contextIsAmbiguous) {
+  if (dbResult && dbResult.confidence >= 0.8) {
     logger.info('NLP: DB keyword match', { intent: dbResult.intent });
     return dbResult;
   }
 
-  // Step 3: Use Claude for complex messages
-  logger.info('NLP: Sending to Claude', { textLength: text.length, contextIsAmbiguous });
+  // Step 3: Last resort — Claude for genuinely complex messages
+  logger.info('NLP: Sending to Claude (no local/DB match)', { textLength: text.length });
   const claudeResult = await analyzeWithClaude(text, employeeContext);
   return claudeResult;
 }

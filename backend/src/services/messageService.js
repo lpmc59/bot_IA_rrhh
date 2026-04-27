@@ -2105,14 +2105,35 @@ async function handleTaskCreate(employee, workDate, shift, messageId, nlpResult,
 }
 
 async function handleTaskStart(employee, workDate, messageId, nlpResult, shift, session) {
+  // Si el NLP local extrajo un task_number explícito (ej. "empiezo con la 1"),
+  // lo resolvemos directamente por display_order — sin depender de fuzzy match
+  // ni de re-parsear el texto. Es zero-cost y determinístico.
+  const taskNumber = nlpResult.entities?.task_number;
   const taskTitle = nlpResult.entities?.task_title;
-  if (!taskTitle) {
+  if (!taskTitle && !taskNumber) {
     return { reply: '¿Cuál tarea quieres iniciar?', instanceId: null };
   }
 
-  // Try by number reference first ("la 2", "tarea 3")
+  // Try by number reference first ("la 2", "tarea 3", o task_number explícito en entities)
   const tasks = await taskService.getTodayTasksForEmployee(employee.employee_id, workDate, shift?.shift_id);
-  const refTask = findTaskByNumberRef(nlpResult.originalText || taskTitle, tasks, tasks);
+  let refTask = null;
+  if (taskNumber) {
+    // Resolver por display_order (1-based, como ve el empleado en "mis tareas")
+    refTask = tasks.find(t => Number(t.display_order) === Number(taskNumber)) || null;
+    // Si pidió número pero no existe en la lista, responder directo (no intentar fuzzy con title vacío)
+    if (!refTask && !taskTitle) {
+      const total = tasks.length;
+      return {
+        reply: total === 0
+          ? 'No tienes tareas asignadas para hoy.'
+          : `No encontré la tarea ${taskNumber}. Tienes ${total} tarea${total > 1 ? 's' : ''}. Decí "mis tareas" para ver la lista.`,
+        instanceId: null,
+      };
+    }
+  }
+  if (!refTask) {
+    refTask = findTaskByNumberRef(nlpResult.originalText || taskTitle || '', tasks, tasks);
+  }
 
   // ─── Guardia: si hay tareas en progreso, pedir confirmación antes de iniciar otra ──
   // Evita que el empleado quede con 2+ tareas abiertas en paralelo sin saberlo.
@@ -2122,7 +2143,7 @@ async function handleTaskStart(employee, workDate, messageId, nlpResult, shift, 
   if (inProgressList.length > 0) {
     // Buscar la tarea objetivo para decidir si hay conflicto real
     let targetForSwitch = refTask;
-    if (!targetForSwitch) {
+    if (!targetForSwitch && taskTitle) {
       targetForSwitch = await taskService.findTaskByTitleAnyStatus(employee.employee_id, workDate, taskTitle);
     }
     const targetId = targetForSwitch?.instance_id;
@@ -2180,7 +2201,13 @@ async function handleTaskStart(employee, workDate, messageId, nlpResult, shift, 
     }
   }
 
-  // Try by fuzzy title match (any status)
+  // Try by fuzzy title match (any status) — solo si tenemos un title con el que buscar
+  if (!taskTitle) {
+    return {
+      reply: 'No encontré la tarea que mencionas. Decí "mis tareas" para ver la lista.',
+      instanceId: null,
+    };
+  }
   const found = await taskService.findTaskByTitleAnyStatus(employee.employee_id, workDate, taskTitle);
   if (found) {
     if (found.status === 'done') {
