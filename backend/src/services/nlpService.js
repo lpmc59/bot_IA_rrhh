@@ -35,11 +35,26 @@ const LOCAL_PATTERNS = {
   // "empiezo con la 1" no caiga en TASK_CREATE con title="1".
   // Devuelven directamente intent=TASK_START con task_number en entities.
   TASK_START_BY_NUMBER: {
+    // Verbos cubiertos (1ra persona + infinitivo + plural):
+    //   empiezo / empezar / empieza / empezamos
+    //   inicio  / iniciar / inicia  / iniciamos
+    //   comienzo / comenzar / comienza / comenzamos
+    //   arranco  / arrancar / arranca  / arrancamos
+    //   sigo / seguir / sigue / seguimos / continuo / continuar / continúa
+    //   voy con / vamos con / hago / hacer / tomo / tomar / paso a la
+    //
+    // Filler opcional después del verbo: con, a, la, el, los, las, tarea, mi tarea
+    // Capturamos número arábigo (1-99) o palabra (uno-diez)
+    //
+    // Ejemplos que matchean con confidence 0.95:
+    //   "iniciar tarea 6"     "empezar la 2"      "comenzar 3"
+    //   "empiezo con la uno"  "voy con la 4"       "sigo con la dos"
+    //   "tomar la 5"          "hacer la 1"         "paso a la 3"
     patterns: [
-      // Numero arábigo: "empiezo 1", "empiezo la 2", "empiezo con la 3"
-      /^(?:empiezo|inicio|comienzo|arranco|me\s+pongo|voy\s+con|sigo\s+con|seguir\s+con|continuar\s+con|continuo\s+con|paso\s+a\s+la|hago\s+la)\s+(?:con\s+)?(?:a\s+)?(?:la|el|los|las|tarea)?\s*(\d{1,2})\s*$/i,
-      // Numero en palabra (1-10): "empiezo con la uno", "voy con la dos"
-      /^(?:empiezo|inicio|comienzo|arranco|me\s+pongo|voy\s+con|sigo\s+con|seguir\s+con|continuar\s+con|continuo\s+con|paso\s+a\s+la|hago\s+la)\s+(?:con\s+)?(?:a\s+)?(?:la|el|los|las|tarea)?\s*(uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s*$/i,
+      // Número arábigo (1-99)
+      /^(?:empiezo|empezar|empieza|empezamos|inicio|iniciar|inicia|iniciamos|comienzo|comenzar|comienza|comenzamos|arranco|arrancar|arranca|arrancamos|me\s+pongo|voy\s+con|vamos\s+con|sigo|sigo\s+con|seguir|seguir\s+con|sigue|seguimos|continuo|continúo|continuar|continuar\s+con|contin[uú]a|paso\s+a\s+la|hago|hago\s+la|hacer|hacer\s+la|tomo|tomo\s+la|tomar|tomar\s+la)\s+(?:con\s+)?(?:a\s+)?(?:mi\s+)?(?:la|el|los|las|tarea)?\s*(\d{1,2})\s*$/i,
+      // Número en palabra (uno-diez)
+      /^(?:empiezo|empezar|empieza|empezamos|inicio|iniciar|inicia|iniciamos|comienzo|comenzar|comienza|comenzamos|arranco|arrancar|arranca|arrancamos|me\s+pongo|voy\s+con|vamos\s+con|sigo|sigo\s+con|seguir|seguir\s+con|sigue|seguimos|continuo|continúo|continuar|continuar\s+con|contin[uú]a|paso\s+a\s+la|hago|hago\s+la|hacer|hacer\s+la|tomo|tomo\s+la|tomar|tomar\s+la)\s+(?:con\s+)?(?:a\s+)?(?:mi\s+)?(?:la|el|los|las|tarea)?\s*(uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s*$/i,
     ],
   },
 
