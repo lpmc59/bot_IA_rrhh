@@ -2118,9 +2118,17 @@ async function handleTaskStart(employee, workDate, messageId, nlpResult, shift, 
   const tasks = await taskService.getTodayTasksForEmployee(employee.employee_id, workDate, shift?.shift_id);
   let refTask = null;
   if (taskNumber) {
-    // Resolver por display_order (1-based, como ve el empleado en "mis tareas")
-    refTask = tasks.find(t => Number(t.display_order) === Number(taskNumber)) || null;
-    // Si pidió número pero no existe en la lista, responder directo (no intentar fuzzy con title vacío)
+    // Resolver por POSICIÓN en la lista (1-based) — coincide con lo que el
+    // empleado ve en "mis tareas". formatTaskList renumera con i+1, NO usa
+    // display_order, porque éste puede tener huecos (ej: 1, 2, 6, 9, 14...)
+    // si las task_instances se generaron desde shift_task_templates con
+    // template_id no consecutivos. Buscar por display_order rompe cuando
+    // hay huecos. Index directo del array es lo correcto.
+    const idx = Number(taskNumber) - 1;
+    if (idx >= 0 && idx < tasks.length) {
+      refTask = tasks[idx];
+    }
+    // Si pidió número pero no existe en la lista visible, responder directo
     if (!refTask && !taskTitle) {
       const total = tasks.length;
       return {
