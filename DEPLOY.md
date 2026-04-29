@@ -274,12 +274,36 @@ for f in backend/migrations/0NN_nueva_migracion.sql; do
   psql -U talindadb_app -d talindadb -h localhost -f "$f"
 done
 
-# Restart
+# Restart bot
 sudo systemctl restart bot-ia-rrhh-backend.service
 
-# Verificar
+# Verificar que arrancó OK
 sudo journalctl -u bot-ia-rrhh-backend.service -n 30 --no-pager
 curl http://127.0.0.1:3000/webhook/health
+
+# ── SOUL.md → sincronizar a las 3 ubicaciones de OpenClaw ─────────────
+# OpenClaw lee el SOUL.md desde ~/.openclaw/SOUL.md y
+# ~/.openclaw/workspace/SOUL.md, NO desde el repo. Si alguno está desactualizado,
+# el agente sigue con el prompt viejo y narra/se desvía aunque el repo
+# tenga la última versión. Ver gotcha #13 en CLAUDE.md.
+#
+# El script deploy-soul.sh:
+#   - Compara md5 de las 3 ubicaciones
+#   - Si difieren, copia con backup automático
+#   - Reinicia openclaw-gateway para recargar el prompt
+bash backend/openclaw/deploy-soul.sh
+
+# (Soporta --dry-run para ver qué cambiaría sin tocar nada,
+#  y --no-restart si querés controlar el restart manual.)
+```
+
+### Verificación rápida del SOUL.md (sin script)
+
+```bash
+md5sum ~/projects/bot_IA_rrhh/backend/openclaw/SOUL.md \
+       ~/.openclaw/SOUL.md \
+       ~/.openclaw/workspace/SOUL.md
+# Esperado: los 3 hashes IGUALES.
 ```
 
 ### Script `deploy-all.sh` (opcional, ubicar en raíz del repo)
