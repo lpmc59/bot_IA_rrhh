@@ -506,6 +506,117 @@ Lectura: si la mayoría de cierres caen en los primeros 10 min post-fin,
 
 ---
 
+## Señal 8 — Costo del NLP (ratio Claude vs local)
+
+**Pregunta**: ¿qué fracción de mensajes está cayendo a Claude (Haiku 4.5 fallback)?
+Cada llamada tiene costo. El piso razonable está en **20–30%** — son mensajes
+genuinamente ambiguos que requieren contexto (ej. el empleado escribe el
+título de una tarea sin verbo, esperando que el bot infiera el estado).
+
+### 8.1 Ratio diario
+
+```sql
+SELECT
+  DATE(created_at) AS dia,
+  (model_info->>'usedClaude')::bool AS via_claude,
+  COUNT(*) AS msgs,
+  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY DATE(created_at)), 1) AS pct
+FROM app.nlp_message_extractions
+WHERE created_at >= NOW() - INTERVAL '14 days'
+GROUP BY 1, 2
+ORDER BY 1 DESC, 2;
+```
+
+**Umbrales operativos**:
+| Ratio Claude | Diagnóstico | Acción |
+|---|---|---|
+| ≤ 30% | Saludable | Ninguna |
+| 30–50% | Probable regresión menor (frase nueva del usuario, regex desactualizado) | Correr Señal 8.2 para identificar qué intents y agregar pattern local |
+| > 50% | Regresión seria (SOUL.md desincronizado, OpenClaw cambió versión, Haiku desviándose) | Verificar `bash backend/openclaw/deploy-soul.sh`, revisar gotchas #11 y #13 de CLAUDE.md |
+
+### 8.2 ¿Qué frases están yendo a Claude?
+
+```sql
+SELECT
+  intent,
+  COUNT(*) AS veces,
+  array_agg(DISTINCT LEFT(LOWER(normalized_task_text), 50)
+            ORDER BY LEFT(LOWER(normalized_task_text), 50)) AS ejemplos
+FROM app.nlp_message_extractions
+WHERE created_at >= NOW() - INTERVAL '24 hours'
+  AND (model_info->>'usedClaude')::bool = true
+  AND normalized_task_text IS NOT NULL
+GROUP BY intent
+ORDER BY veces DESC;
+```
+
+**Lectura**: si un mismo `intent` aparece >10 veces con ejemplos similares,
+hay un pattern local que se puede agregar para evitar el fallback. Si los
+ejemplos son títulos literales de tareas (ej. "limpieza baños mujeres planta
+baja"), es ambigüedad genuina que requiere contexto y Claude lo resuelve
+bien — no agregar regex.
+
+### 8.3 Detección de narraciones del modelo (leak grave)
+
+```sql
+SELECT
+  message_text,
+  received_ts
+FROM app.chat_messages
+WHERE direction = 'out'
+  AND received_ts >= NOW() - INTERVAL '24 hours'
+  AND (
+    message_text ILIKE 'The user%'
+    OR message_text ILIKE 'I need to%'
+    OR message_text ILIKE 'NO_REPLY%'
+    OR message_text ILIKE '%backend returned%'
+    OR message_text ILIKE '%backend responded%'
+  )
+LIMIT 20;
+```
+
+**Esperado**: 0 rows. **CAVEAT**: esta query solo detecta narraciones que
+pasaron por el backend. OpenClaw concatena su narración con el reply del
+backend antes de mandarlo a Telegram, y el backend solo guarda el `reply`
+puro en `chat_messages` — no la parte narrada. Para detectar narraciones
+de OpenClaw que llegan al usuario sin pasar por el backend, hay que confiar
+en reportes manuales de empleados.
+
+### 8.4 Costo estimado / día
+
+```sql
+SELECT
+  DATE(created_at) AS dia,
+  SUM((model_info->>'inputTokens')::int) AS in_tokens,
+  SUM((model_info->>'outputTokens')::int) AS out_tokens,
+  ROUND(
+    SUM((model_info->>'inputTokens')::int) * 1.0 / 1000000 +
+    SUM((model_info->>'outputTokens')::int) * 5.0 / 1000000,
+    4
+  ) AS costo_usd_estimado
+FROM app.nlp_message_extractions
+WHERE created_at >= NOW() - INTERVAL '14 days'
+  AND (model_info->>'usedClaude')::bool = true
+GROUP BY 1
+ORDER BY 1 DESC;
+```
+
+Precios Haiku 4.5: `$1/MTok input`, `$5/MTok output`. **Ojo**: este costo
+es solo del NLP del bot. El costo principal viene de OpenClaw como agente
+LLM por mensaje (ver Anthropic Console Usage para totales reales).
+
+### Métrica baseline (abr-2026, Talinda, 6 empleados)
+
+Tras los fixes de patterns numéricos + SOUL.md sincronizado:
+- Local: 71% (92 msgs/día)
+- Claude: 29% (37 msgs/día)
+- 0 narraciones leaks
+- Costo NLP del bot: ~$0.20–0.40/día
+
+Si te alejás mucho de estos números → señal de regresión.
+
+---
+
 ## Migraciones relacionadas
 
 - `migrations/016_waiting_switch_confirm_state.sql` — añade
