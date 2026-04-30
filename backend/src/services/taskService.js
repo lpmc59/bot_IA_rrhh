@@ -245,7 +245,11 @@ async function getTodayTasksForEmployee(employeeId, workDate, shiftId) {
      ) tok ON t.requires_mobile_ui = true
      WHERE ti.employee_id = $1
        AND ti.work_date = $2
-       AND ti.status != 'canceled'`;
+       AND ti.status NOT IN ('canceled', 'continued')`;
+  // Excluimos 'continued': el técnico ya pausó esa instance hoy y la
+  // siguiente vive en work_date = mañana. Mostrársela acá confunde
+  // (¿qué hago con esto?). Reportes de supervisor son queries
+  // separadas, ahí sí pueden incluir 'continued' si lo quieren.
   const params = [employeeId, workDate];
 
   if (shiftId) {
@@ -1127,10 +1131,13 @@ function formatTaskList(tasks) {
 
   const statusEmoji = {
     planned: '📋',
+    traveling: '🚗',
+    on_site: '📍',
     in_progress: '🔄',
     blocked: '🚫',
     done: '✅',
     canceled: '❌',
+    continued: '🌙',
   };
 
   let msg = '*Tus tareas para hoy:*\n\n';
