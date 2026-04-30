@@ -311,6 +311,218 @@ router.get('/task/:token/progress', validateToken, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// QUICK ACTIONS  — botones de la UI móvil para tickets (optel-redes y similares)
+// ───────────────────────────────────────────────────────────────────────────────
+// El técnico opera el ticket sin Telegram desde su navegador móvil. Cada
+// acción dispara las MISMAS funciones del taskService que el flujo Telegram,
+// para que los reportes de productividad sumen igual sin importar el canal.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Helper para responder 4xx/5xx coherentemente cuando taskService lanza
+// TaskStatusError (transición ilegal, instance not found, etc.)
+function _sendActionError(res, err, fallbackStatus = 500) {
+  if (err && err.code && err.httpStatus) {
+    return res.status(err.httpStatus).json({
+      ok: false, error: err.code, message: err.message,
+    });
+  }
+  logger.error('Mobile action error', { err: err?.message, stack: err?.stack });
+  return res.status(fallbackStatus).json({ ok: false, error: 'internal_error', message: err?.message });
+}
+
+// Wrapper genérico: cambia status de la instance vía setTaskInstanceStatus.
+// Mismo motor que /api/external/.../status, así que los reportes y el log
+// `task_updates` se generan igual que cualquier otra transición.
+async function _setStatus(req, res, newStatus, { requireNote = false } = {}) {
+  try {
+    const { instance, employee } = req.taskData;
+    const note = (req.body?.note || '').trim() || null;
+    if (requireNote && !note) {
+      return res.status(422).json({ ok: false, error: 'note_required',
+        message: `Para status=${newStatus} hay que indicar un motivo en "note".` });
+    }
+    const result = await taskService.setTaskInstanceStatus(instance.instanceId, newStatus, {
+      employeeId: employee.employeeId,
+      note,
+    });
+    res.json({
+      ok: true,
+      status: result.status,
+      previous_status: result.previous,
+      changed: result.changed,
+    });
+  } catch (err) {
+    return _sendActionError(res, err);
+  }
+}
+
+// POST /task/:token/start  → in_progress
+router.post('/task/:token/start', validateToken, (req, res) => _setStatus(req, res, 'in_progress'));
+
+// POST /task/:token/traveling
+router.post('/task/:token/traveling', validateToken, (req, res) => _setStatus(req, res, 'traveling'));
+
+// POST /task/:token/on-site
+router.post('/task/:token/on-site', validateToken, (req, res) => _setStatus(req, res, 'on_site'));
+
+// POST /task/:token/done
+router.post('/task/:token/done', validateToken, (req, res) => _setStatus(req, res, 'done'));
+
+// POST /task/:token/blocked  — requiere body.note con el motivo
+router.post('/task/:token/blocked', validateToken, (req, res) =>
+  _setStatus(req, res, 'blocked', { requireNote: true }));
+
+// POST /task/:token/progress  — body: { progress_percent, note? }
+router.post('/task/:token/progress', validateToken, async (req, res) => {
+  try {
+    const { instance, employee } = req.taskData;
+    const pct = parseInt(req.body?.progress_percent, 10);
+    if (Number.isNaN(pct) || pct < 0 || pct > 100) {
+      return res.status(422).json({ ok: false, error: 'progress_percent_invalid',
+        message: 'progress_percent debe ser entero 0..100' });
+    }
+    const note = (req.body?.note || '').trim() || null;
+    await taskService.updateTaskProgress(
+      instance.instanceId, pct, employee.employeeId, null, note
+    );
+    res.json({ ok: true, progress_percent: pct });
+  } catch (err) {
+    return _sendActionError(res, err);
+  }
+});
+
+// POST /task/:token/continue-tomorrow  — pausa multi-día
+router.post('/task/:token/continue-tomorrow', validateToken, async (req, res) => {
+  try {
+    const { instance, employee } = req.taskData;
+    const result = await taskService.markTaskContinuedTomorrow(
+      instance.instanceId, employee.employeeId, {}
+    );
+    res.json({
+      ok: true,
+      yesterday_instance_id: result.yesterdayInstanceId,
+      tomorrow_instance_id: result.tomorrowInstanceId,
+      tomorrow_date: result.tomorrowDate,
+      tomorrow_token: result.tomorrowToken || null,
+      // El link de mañana es lo que vale: hoy el token actual quedará válido
+      // pero la instance será 'continued' (no operable). Mañana hay que usar
+      // el nuevo token que sí apunta a la nueva instance.
+      tomorrow_mobile_link: result.tomorrowToken
+        ? `${(process.env.MOBILE_BASE_URL || '').replace(/\/+$/, '')}/m/task/${result.tomorrowToken}`
+        : null,
+    });
+  } catch (err) {
+    return _sendActionError(res, err);
+  }
+});
+
+// POST /task/:token/note  — body: { note }
+// Agrega una nota libre al timeline sin cambiar status.
+router.post('/task/:token/note', validateToken, async (req, res) => {
+  try {
+    const { instance, employee } = req.taskData;
+    const note = (req.body?.note || '').trim();
+    if (!note) {
+      return res.status(422).json({ ok: false, error: 'note_required',
+        message: 'note es obligatorio' });
+    }
+    const { query } = require('../config/database');
+    const r = await query(
+      `INSERT INTO task_updates (instance_id, employee_id, update_type, note_text)
+       VALUES ($1, $2, 'NOTE', $3)
+       RETURNING update_id, created_at`,
+      [instance.instanceId, employee.employeeId, note]
+    );
+    await query(
+      `UPDATE task_instances SET last_update_at = NOW() WHERE instance_id = $1`,
+      [instance.instanceId]
+    );
+    res.json({
+      ok: true,
+      update_id: r.rows[0].update_id,
+      created_at: r.rows[0].created_at,
+    });
+  } catch (err) {
+    return _sendActionError(res, err);
+  }
+});
+
+// POST /task/:token/photo  — multipart/form-data: photo file (+ optional caption)
+// La foto se guarda en uploads/, se inserta en app.attachments (mismo patrón
+// que attachExternalResource) y se loguea como NOTE en task_updates para
+// que aparezca en el timeline.
+router.post('/task/:token/photo', validateToken, upload.single('photo'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ ok: false, error: 'photo_required',
+        message: 'No se recibió foto en el campo "photo"' });
+    }
+    const { instance, employee } = req.taskData;
+    const uploadDir = process.env.UPLOAD_DIR || './uploads';
+    const originalPath = req.file.path;
+
+    // Resize/normalize a JPEG igual que el endpoint de checklist
+    let finalFilename = req.file.filename;
+    let finalSize = req.file.size;
+    try {
+      const jpgFilename = req.file.filename.replace(/\.\w+$/, '.jpg');
+      const jpgPath = path.join(uploadDir, jpgFilename);
+      await sharp(originalPath)
+        .rotate()
+        .resize(1920, 1920, { fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality: 85 })
+        .toFile(jpgPath);
+      const stat = fs.statSync(jpgPath);
+      finalSize = stat.size;
+      if (originalPath !== jpgPath) {
+        try { fs.unlinkSync(originalPath); } catch (_) {}
+      }
+      finalFilename = jpgFilename;
+    } catch (sharpErr) {
+      logger.warn('Sharp resize failed (mobile/task/photo), using original', { err: sharpErr.message });
+    }
+
+    const photoUrl = `/uploads/${finalFilename}`;
+    const caption = (req.body?.caption || '').trim() || null;
+
+    // Insertar attachment a nivel task (no a checklist item)
+    const { query } = require('../config/database');
+    const att = await query(
+      `INSERT INTO app.attachments (
+         task_id, employee_id, file_name, file_url, content_type, file_size_bytes
+       ) VALUES ($1, $2, $3, $4, 'image/jpeg', $5)
+       RETURNING attachment_id, file_url, created_at`,
+      [instance.taskId, employee.employeeId, req.file.originalname || finalFilename, photoUrl, finalSize]
+    );
+
+    // Log en task_updates para que aparezca en el timeline del ticket
+    await query(
+      `INSERT INTO task_updates (instance_id, employee_id, update_type, note_text)
+       VALUES ($1, $2, 'NOTE', $3)`,
+      [instance.instanceId, employee.employeeId,
+       `📷 Foto adjunta: ${photoUrl}${caption ? ` — ${caption}` : ''}`]
+    );
+    await query(
+      `UPDATE task_instances SET last_update_at = NOW() WHERE instance_id = $1`,
+      [instance.instanceId]
+    );
+
+    res.json({
+      ok: true,
+      attachment_id: att.rows[0].attachment_id,
+      file_url: photoUrl,
+      caption,
+    });
+  } catch (err) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ ok: false, error: 'file_too_large',
+        message: 'La foto es muy grande. Máximo 25MB.' });
+    }
+    return _sendActionError(res, err);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // SUPERVISOR TASK ASSIGNMENT
 // ═══════════════════════════════════════════════════════════════════════════════
 

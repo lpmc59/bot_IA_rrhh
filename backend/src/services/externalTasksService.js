@@ -20,6 +20,15 @@ const { query, getClient } = require('../config/database');
 const logger = require('../utils/logger');
 const outboxService = require('./outboxService');
 
+// Base URL para construir el link móvil enviado al técnico cuando
+// requires_mobile_ui = true. Mismo valor que usa taskService.MOBILE_BASE_URL,
+// pero lo replicamos acá para no crear dependencia circular en módulo init.
+const MOBILE_BASE_URL = (process.env.MOBILE_BASE_URL || 'http://localhost:3000').replace(/\/+$/, '');
+
+function buildMobileLink(token) {
+  return token ? `${MOBILE_BASE_URL}/m/task/${token}` : null;
+}
+
 // ─── Errores de negocio (codificados para responses HTTP limpias) ───────────
 class ExternalTaskError extends Error {
   constructor(code, message, httpStatus = 422) {
@@ -96,6 +105,7 @@ async function findExternalTaskByRef(externalSource, externalRef) {
 async function getExternalTask(taskId) {
   const t = await query(`SELECT * FROM app.tasks WHERE task_id = $1`, [taskId]);
   if (!t.rows[0]) return null;
+  const task = t.rows[0];
 
   const instances = await query(
     `SELECT instance_id, work_date, status, progress_percent,
@@ -126,12 +136,37 @@ async function getExternalTask(taskId) {
     [taskId]
   );
 
+  // Si la tarea fue marcada con requires_mobile_ui, devolvemos el link
+  // móvil activo (si existe token vivo) para que optel-redes pueda
+  // mostrarlo en su UI de ticket o reenviarlo al técnico si lo perdió.
+  let mobile_link = null;
+  let mobile_token_expires_at = null;
+  if (task.requires_mobile_ui) {
+    const tok = await query(
+      `SELECT t.token, t.expires_at
+       FROM app.task_instance_access_tokens t
+       JOIN app.task_instances ti ON ti.instance_id = t.instance_id
+       WHERE ti.task_id = $1
+         AND t.revoked = false
+         AND t.expires_at > NOW()
+       ORDER BY t.created_at DESC
+       LIMIT 1`,
+      [taskId]
+    );
+    if (tok.rows[0]) {
+      mobile_link = buildMobileLink(tok.rows[0].token);
+      mobile_token_expires_at = tok.rows[0].expires_at;
+    }
+  }
+
   return {
-    task: t.rows[0],
+    task,
     instances: instances.rows,
     scheduled_dates: scheduled.rows.map(r => r.work_date),
     attachments: attachments.rows,
     updates: updates.rows,
+    mobile_link,
+    mobile_token_expires_at,
   };
 }
 
@@ -180,6 +215,7 @@ async function createExternalTask(params) {
     title, description, employeeId,
     dueDates, priority = 3, plannedMinutes = null,
     teamId = null, projectId = null, meta = null,
+    requiresMobileUi = false,
   } = params;
 
   if (!externalSource) throw new ExternalTaskError('external_source_required', 'external_source requerido');
@@ -219,13 +255,15 @@ async function createExternalTask(params) {
          planned_minutes, status, due_date,
          assigned_by, created_by,
          frequency, weekday_mask, team_id,
-         external_source, external_ref, external_meta
+         external_source, external_ref, external_meta,
+         requires_mobile_ui
        ) VALUES (
          $1, $2, $3, $4, $5,
          $6, 'backlog', $7,
          NULL, NULL,
          $8, 0, $9,
-         $10, $11, $12
+         $10, $11, $12,
+         $13
        )
        RETURNING *`,
       [
@@ -234,6 +272,7 @@ async function createExternalTask(params) {
         plannedMinutes ?? 0, primaryDate,
         frequency, teamId,
         externalSource, externalRef, meta ? JSON.stringify(meta) : null,
+        !!requiresMobileUi,
       ]
     );
     const task = taskRes.rows[0];
@@ -290,12 +329,44 @@ async function createExternalTask(params) {
     }
 
     await client.query('COMMIT');
+
+    // Si la tarea pide UI móvil y ya existe instance hoy → generar token
+    // de inmediato para que el create response devuelva mobile_link y el
+    // técnico pueda recibirlo en el primer mensaje (o optel-redes pueda
+    // pintarlo en su panel del ticket).
+    //
+    // Si no hay instance hoy (la fecha es futura), el token se generará
+    // automáticamente cuando el cron materialice la instance del día.
+    let mobileLink = null;
+    let mobileToken = null;
+    if (requiresMobileUi && instance) {
+      try {
+        const taskService = require('./taskService');
+        mobileToken = await taskService.generateAccessToken(
+          instance.instance_id, employeeId
+        );
+        mobileLink = buildMobileLink(mobileToken);
+      } catch (err) {
+        // No fallar el create si el token falla — el ticket ya quedó.
+        // optel-redes puede pedirlo después con GET /api/external/tasks/:id
+        logger.warn('External task: token generation failed (non-fatal)', {
+          taskId: task.task_id, err: err.message,
+        });
+      }
+    }
+
     logger.info('External task created', {
       externalSource, externalRef,
       taskId: task.task_id, instanceId: instance?.instance_id,
       dates, includesToday,
+      requiresMobileUi: !!requiresMobileUi,
+      mobileLink: !!mobileLink,
     });
-    return { task, instance, employee, idempotent: false };
+    return {
+      task, instance, employee, idempotent: false,
+      mobile_link: mobileLink,
+      mobile_token: mobileToken,
+    };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -456,7 +527,7 @@ async function attachExternalResource(taskId, { url, type, caption = null, fileN
 
 // ─── NOTIFICACIONES (se llaman desde el route, fuera de la transacción DB) ──
 
-async function notifyTaskAssigned({ task, instance, employee, attachments = [] }) {
+async function notifyTaskAssigned({ task, instance, employee, attachments = [], mobileLink = null }) {
   if (!employee) return { sent: false, reason: 'no_employee' };
   const target = employee.telegram_id || employee.phone_e164;
   if (!target) return { sent: false, reason: 'no_contact' };
@@ -479,7 +550,14 @@ async function notifyTaskAssigned({ task, instance, employee, attachments = [] }
       lines.push(`  • ${a.url}${cap}`);
     }
   }
-  lines.push(`\nResponde "empiezo" cuando vayas a iniciarla.`);
+  // Si la tarea pide UI móvil, el link es el canal preferido para que el
+  // técnico opere — Telegram queda como atajo redundante.
+  if (mobileLink) {
+    lines.push(`\n📱 Abrí el ticket desde tu móvil:\n${mobileLink}`);
+    lines.push(`\nO respondé "empiezo" si preferís Telegram.`);
+  } else {
+    lines.push(`\nResponde "empiezo" cuando vayas a iniciarla.`);
+  }
 
   await outboxService.queueMessage(target, lines.join('\n'));
   return { sent: true, target };

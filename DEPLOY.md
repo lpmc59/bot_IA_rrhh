@@ -353,6 +353,25 @@ SELECT enum_range(NULL::app.nlp_intent);
 | Migración | Talinda | Hetzner |
 |---|---|---|
 | `016_waiting_switch_confirm_state.sql` | verificar con `SELECT enum_range(NULL::app.session_state);` | verificar |
+| `020_continued_status_and_mobile_ui.sql` | aplicar antes de deploy (continúa multi-día + flag `requires_mobile_ui`) | aplicar antes de deploy (necesario para tickets externos optel-redes con UI móvil) |
+
+### Migración 020 — verificación post-aplicación
+
+```sql
+-- Debe incluir 'continued'
+SELECT unnest(enum_range(NULL::app.task_instance_status));
+-- Debe incluir 'CONTINUED_TOMORROW'
+SELECT unnest(enum_range(NULL::app.task_update_type));
+-- Debe existir la columna
+SELECT column_name, data_type, column_default
+FROM information_schema.columns
+WHERE table_schema='app' AND table_name='tasks' AND column_name='requires_mobile_ui';
+```
+
+Y agregar al `.env` del bot:
+```
+TOKEN_EXPIRY_HOURS_EXTERNAL=168    # 7 días, para tokens de tickets con requires_mobile_ui
+```
 
 ## Admin app — otro repo
 

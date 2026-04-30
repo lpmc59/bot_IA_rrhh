@@ -708,6 +708,160 @@ async function setTaskInstanceStatus(instanceId, newStatus, opts = {}) {
   }
 }
 
+// ─── Marcar tarea como "continúa mañana" ──────────────────────────────────
+//
+// Cierra la task_instance de HOY (status='continued') y crea una nueva
+// task_instance idéntica para MAÑANA (status='planned'), heredando task_id
+// y datos clave (title, description, standard_minutes, shift_id, team).
+//
+// Si la tarea madre tenía requires_mobile_ui=true, genera un nuevo token
+// para la instance de mañana y lo retorna en el payload (junto con el link).
+//
+// Idempotencia: si la instance ya está 'continued' y existe instance para
+// mañana con mismo task_id, no duplica — retorna las existentes.
+//
+// Reglas:
+//   - La instance de hoy debe estar en estado activo (in_progress / on_site /
+//     traveling) o 'planned' (caso raro pero aceptado: técnico no inició y
+//     ya sabe que no la hará hoy).
+//   - 'done' / 'canceled' / 'continued' → rechaza con TaskStatusError.
+//   - 'blocked' → rechaza (resolver bloqueo primero).
+async function markTaskContinuedTomorrow(instanceId, employeeId, opts = {}) {
+  const { messageId = null, note = null } = opts;
+
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+
+    const cur = await client.query(
+      `SELECT ti.*, t.requires_mobile_ui, t.title AS parent_title
+       FROM task_instances ti
+       LEFT JOIN tasks t ON t.task_id = ti.task_id
+       WHERE ti.instance_id = $1 FOR UPDATE`,
+      [instanceId]
+    );
+    if (!cur.rows[0]) {
+      throw new TaskStatusError('instance_not_found',
+        `task_instance ${instanceId} no existe`, 404);
+    }
+    const inst = cur.rows[0];
+
+    // Estados aceptados para continuar mañana
+    const ACCEPTED = ['planned', 'in_progress', 'on_site', 'traveling'];
+    if (!ACCEPTED.includes(inst.status)) {
+      throw new TaskStatusError('cannot_continue_from_status',
+        `No se puede marcar 'continúo mañana' desde status='${inst.status}'. ` +
+        `Estados válidos: ${ACCEPTED.join(', ')}.`, 409);
+    }
+
+    const today = inst.work_date instanceof Date
+      ? inst.work_date.toISOString().slice(0, 10)
+      : String(inst.work_date).slice(0, 10);
+    // Mañana = today + 1 día
+    const todayDate = new Date(today + 'T00:00:00');
+    todayDate.setDate(todayDate.getDate() + 1);
+    const tomorrow = todayDate.toISOString().slice(0, 10);
+
+    // 1) Cerrar HOY: status='continued', last_update_at, parar time_log
+    await client.query(
+      `UPDATE task_instances
+       SET status = 'continued', last_update_at = NOW()
+       WHERE instance_id = $1`,
+      [instanceId]
+    );
+    await stopTimeLog(employeeId, client);
+
+    // Registrar update
+    await client.query(
+      `INSERT INTO task_updates (instance_id, employee_id, message_id, update_type, note_text)
+       VALUES ($1, $2, $3, 'CONTINUED_TOMORROW', $4)`,
+      [instanceId, employeeId, messageId,
+       note || `Continúa mañana ${tomorrow}`]
+    );
+
+    // 2) Crear instance de MAÑANA. Idempotencia: si ya existe una
+    // task_instance con (employee_id, work_date=tomorrow, task_id=...) NO done/canceled,
+    // reusarla.
+    let tomorrowInstance = null;
+    if (inst.task_id) {
+      const existing = await client.query(
+        `SELECT * FROM task_instances
+         WHERE employee_id = $1 AND work_date = $2 AND task_id = $3
+           AND status NOT IN ('done', 'canceled')
+         LIMIT 1`,
+        [employeeId, tomorrow, inst.task_id]
+      );
+      if (existing.rows[0]) tomorrowInstance = existing.rows[0];
+    }
+
+    if (!tomorrowInstance) {
+      // display_order = MAX(display_order) + 1 para mañana
+      const ordRow = await client.query(
+        `SELECT COALESCE(MAX(display_order), 0) + 1 AS next_ord
+         FROM task_instances WHERE employee_id = $1 AND work_date = $2`,
+        [employeeId, tomorrow]
+      );
+      const insRes = await client.query(
+        `INSERT INTO task_instances (
+           employee_id, work_date, shift_id, task_id, template_id,
+           title, description, standard_minutes,
+           status, display_order, created_by, progress_percent
+         ) VALUES (
+           $1, $2, $3, $4, $5,
+           $6, $7, $8,
+           'planned', $9, $10, 0
+         )
+         RETURNING *`,
+        [
+          employeeId, tomorrow,
+          inst.shift_id, inst.task_id, inst.template_id,
+          inst.title, inst.description, inst.standard_minutes,
+          ordRow.rows[0].next_ord,
+          inst.created_by,
+        ]
+      );
+      tomorrowInstance = insRes.rows[0];
+    }
+
+    // 3) Si la task madre tiene requires_mobile_ui=true, generar token nuevo
+    // para la instance de mañana
+    let tomorrowToken = null;
+    if (inst.requires_mobile_ui && tomorrowInstance) {
+      // Reutilizar generateAccessToken (que ya respeta expiry largo si requires_mobile_ui=true)
+      tomorrowToken = crypto.randomBytes(32).toString('hex');
+      await client.query(
+        `INSERT INTO task_instance_access_tokens (instance_id, employee_id, token, expires_at)
+         VALUES ($1, $2, $3, NOW() + ($4 || ' hours')::interval)`,
+        [tomorrowInstance.instance_id, employeeId, tomorrowToken,
+         String(TOKEN_EXPIRY_HOURS_EXTERNAL)]
+      );
+    }
+
+    await client.query('COMMIT');
+    logger.info('markTaskContinuedTomorrow OK', {
+      instanceId, tomorrowInstance: tomorrowInstance?.instance_id,
+      taskId: inst.task_id, today, tomorrow,
+    });
+
+    return {
+      yesterdayInstanceId: instanceId,
+      tomorrowInstanceId: tomorrowInstance?.instance_id || null,
+      tomorrowDate: tomorrow,
+      tomorrowToken,
+      requiresMobileUi: !!inst.requires_mobile_ui,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    if (err instanceof TaskStatusError) throw err;
+    logger.error('markTaskContinuedTomorrow failed', {
+      instanceId, err: err.message,
+    });
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 async function createAdHocTask(employeeId, workDate, title, description, shiftId, standardMinutes) {
   const client = await getClient();
   try {
@@ -1030,6 +1184,8 @@ async function updateStandardMinutes(instanceId, minutes) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const TOKEN_EXPIRY_HOURS = parseInt(process.env.TOKEN_EXPIRY_HOURS || '24');
+// Tickets externos (optel-redes) duran varios días — token más largo
+const TOKEN_EXPIRY_HOURS_EXTERNAL = parseInt(process.env.TOKEN_EXPIRY_HOURS_EXTERNAL || '168'); // 7 días
 const MOBILE_BASE_URL = (process.env.MOBILE_BASE_URL || 'http://localhost:3000').replace(/\/+$/, '');
 
 /**
@@ -1153,12 +1309,27 @@ async function getTaskTeam(taskId) {
  * Genera un token de acceso móvil para una instancia.
  * Retorna el token string (64 hex chars).
  */
-async function generateAccessToken(instanceId, employeeId) {
+async function generateAccessToken(instanceId, employeeId, options = {}) {
+  // options.expiryHours puede sobreescribir el default. Si la task asociada
+  // tiene requires_mobile_ui=true (tickets externos), usar TOKEN_EXPIRY_HOURS_EXTERNAL
+  // por default. Caller también puede pasar expiryHours explícito.
+  let expiry = options.expiryHours;
+  if (!expiry) {
+    // Lookup si la task madre requiere mobile UI (token largo)
+    const r = await query(
+      `SELECT t.requires_mobile_ui
+       FROM task_instances ti
+       LEFT JOIN tasks t ON t.task_id = ti.task_id
+       WHERE ti.instance_id = $1 LIMIT 1`,
+      [instanceId]
+    );
+    expiry = r.rows[0]?.requires_mobile_ui ? TOKEN_EXPIRY_HOURS_EXTERNAL : TOKEN_EXPIRY_HOURS;
+  }
   const token = crypto.randomBytes(32).toString('hex');
   await query(
     `INSERT INTO task_instance_access_tokens (instance_id, employee_id, token, expires_at)
-     VALUES ($1, $2, $3, NOW() + INTERVAL '${TOKEN_EXPIRY_HOURS} hours')`,
-    [instanceId, employeeId, token]
+     VALUES ($1, $2, $3, NOW() + ($4 || ' hours')::interval)`,
+    [instanceId, employeeId, token, String(expiry)]
   );
   return token;
 }
@@ -1687,6 +1858,7 @@ module.exports = {
   restartTask,
   setTaskInstanceStatus,
   TaskStatusError,
+  markTaskContinuedTomorrow,
   createAdHocTask,
   generateDailyTaskInstances,
   formatTaskList,

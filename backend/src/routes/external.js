@@ -59,6 +59,10 @@ router.post('/tasks', async (req, res) => {
       teamId:           body.team_id,
       projectId:        body.project_id,
       meta:             body.meta,
+      // Si optel-redes pone requires_mobile_ui=true, el bot genera un
+      // access_token al crear la instance y devuelve mobile_link en la
+      // respuesta. Además el mensaje Telegram al técnico incluye el link.
+      requiresMobileUi: body.requires_mobile_ui === true,
     });
     // Notificación fuera de la transacción (no bloquea creación si falla outbox)
     let notified = null;
@@ -68,6 +72,7 @@ router.post('/tasks', async (req, res) => {
           task: result.task,
           instance: result.instance,
           employee: result.employee,
+          mobileLink: result.mobile_link || null,
         });
       } catch (err) {
         logger.warn('Notify on create failed (no bloquea creación)', { err: err.message });
@@ -78,6 +83,7 @@ router.post('/tasks', async (req, res) => {
       idempotent: result.idempotent,
       task_id: result.task.task_id,
       instance_id: result.instance?.instance_id ?? null,
+      mobile_link: result.mobile_link || null,
       notified: notified?.sent ?? false,
       notified_reason: notified?.reason ?? null,
     });

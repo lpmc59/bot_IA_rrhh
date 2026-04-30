@@ -479,6 +479,11 @@ async function processInboundMessage({ phone, openclawUserId, telegramId, text, 
         employee, workDate, activeTask, messageId, 'on_site'));
       break;
 
+    case 'TASK_CONTINUE_TOMORROW':
+      ({ reply, instanceId } = await handleTaskContinueTomorrow(
+        employee, workDate, activeTask, messageId));
+      break;
+
     case 'ASSIGN_TASK': {
       const isMgr = ['manager', 'admin', 'general_supervisor', 'supervisor_auditor'].includes(employee.role);
       if (!isMgr) {
@@ -1970,6 +1975,63 @@ async function handleTaskTravelOrOnSite(employee, workDate, activeTask, messageI
     : `📍 Perfecto, estás en el sitio de *${title}*. Decí "empiezo" cuando arranques el trabajo.`;
 
   return { reply: msg, instanceId: activeTask.instance_id };
+}
+
+// ─── TASK_CONTINUE_TOMORROW ──────────────────────────────────────────────────
+// El técnico decide pausar la tarea hoy y retomarla mañana. La instance de
+// hoy queda en status='continued' (NO 'blocked' — eso es para problemas que
+// requieren al supervisor) y se crea una task_instance nueva para mañana
+// con el mismo task_id. La tarea madre (app.tasks) sigue abierta.
+async function handleTaskContinueTomorrow(employee, workDate, activeTask, messageId) {
+  if (!activeTask) {
+    // Buscar tarea activa con misma lógica que travel/on_site
+    const all = await taskService.getTodayTasksForEmployee(employee.employee_id, workDate);
+    const ACTIVE = ['in_progress', 'traveling', 'on_site', 'planned'];
+    const candidate = (all || [])
+      .filter(t => ACTIVE.includes(t.status))
+      .sort((a, b) => {
+        const la = a.last_update_at || a.started_at || a.created_at || '';
+        const lb = b.last_update_at || b.started_at || b.created_at || '';
+        return String(lb).localeCompare(String(la));
+      })[0];
+    if (!candidate) {
+      return {
+        reply: 'No tenés ninguna tarea activa para pausar hasta mañana. Si querés iniciar una, decí "empiezo con la N".',
+        instanceId: null,
+      };
+    }
+    activeTask = candidate;
+  }
+
+  try {
+    const result = await taskService.markTaskContinuedTomorrow(
+      activeTask.instance_id,
+      employee.employee_id,
+      { messageId }
+    );
+    const title = activeTask.title || 'tu tarea';
+    const lines = [
+      `🌙 Anotado — *${title}* queda pausada hasta mañana.`,
+      `Mañana te aparecerá nuevamente en tu lista para que la retomes.`,
+    ];
+    if (result.tomorrowToken) {
+      const baseUrl = (process.env.MOBILE_BASE_URL || '').replace(/\/+$/, '');
+      if (baseUrl) {
+        lines.push(`\n📱 Link móvil para mañana:\n${baseUrl}/m/task/${result.tomorrowToken}`);
+      }
+    }
+    return { reply: lines.join('\n'), instanceId: activeTask.instance_id };
+  } catch (err) {
+    logger.warn('markTaskContinuedTomorrow (telegram) failed', {
+      employeeId: employee.employee_id,
+      instanceId: activeTask.instance_id,
+      err: err.message,
+    });
+    return {
+      reply: `No pude pausar la tarea hasta mañana: ${err.message}`,
+      instanceId: activeTask.instance_id,
+    };
+  }
 }
 
 async function handleTaskBlocked(employee, workDate, activeTask, messageId, nlpResult, session) {

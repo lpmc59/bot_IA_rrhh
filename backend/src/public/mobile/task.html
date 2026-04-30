@@ -206,6 +206,69 @@
   .btn-undo { background: var(--warning); color: white; }
   .btn-delete-photo { background: #fce8e6; color: var(--danger); font-size: 12px; padding: 6px 10px; min-height: 32px; flex: none; }
 
+  /* ─── Quick Actions (acciones de ticket) ─────────────── */
+  .quick-actions {
+    background: var(--card);
+    border-radius: var(--radius);
+    margin: 12px 20px;
+    padding: 14px;
+    border: 1px solid var(--border);
+  }
+  .quick-actions .section-title {
+    margin-bottom: 10px;
+    color: var(--text-secondary);
+  }
+  .quick-actions .status-pill {
+    display: inline-block;
+    background: var(--primary);
+    color: white;
+    padding: 4px 10px;
+    font-size: 11px;
+    border-radius: 999px;
+    text-transform: uppercase;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    margin-bottom: 10px;
+  }
+  .quick-actions .status-pill.s-done { background: var(--success); }
+  .quick-actions .status-pill.s-blocked { background: var(--danger); }
+  .quick-actions .status-pill.s-continued { background: #8e44ad; }
+  .quick-actions .status-pill.s-traveling,
+  .quick-actions .status-pill.s-on_site { background: var(--warning); color: var(--text); }
+  .quick-actions .actions-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .quick-actions .actions-row .btn { flex: none; }
+  .btn-traveling { background: #fef3c7; color: #92400e; }
+  .btn-on-site { background: #d1fae5; color: #065f46; }
+  .btn-start { background: var(--primary); color: white; }
+  .btn-progress { background: #e0e7ff; color: #3730a3; }
+  .btn-blocked { background: var(--danger); color: white; }
+  .btn-continue { background: #ede9fe; color: #5b21b6; }
+  .btn-add-note { background: #e8f0fe; color: var(--primary); }
+  .btn-add-photo { background: #fef3c7; color: #92400e; }
+
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    display: none; align-items: center; justify-content: center; z-index: 1000;
+    padding: 20px;
+  }
+  .modal-overlay.visible { display: flex; }
+  .modal {
+    background: var(--card); border-radius: var(--radius);
+    padding: 20px; max-width: 420px; width: 100%;
+  }
+  .modal h3 { margin-bottom: 12px; font-size: 17px; }
+  .modal textarea, .modal input[type="number"] {
+    width: 100%; border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px; font-size: 15px; font-family: inherit; resize: vertical;
+    min-height: 80px;
+  }
+  .modal .modal-actions { display: flex; gap: 8px; margin-top: 12px; }
+  .modal .btn { flex: 1; }
+
   /* ─── Note input ────────────────────────────────────── */
   .note-input {
     display: none;
@@ -528,6 +591,12 @@
       html += `<div class="task-desc"><p>${esc(task.description)}</p></div>`;
     }
 
+    // ─── Quick Actions (acciones del ticket) ───────────────────────────────
+    // Botones contextuales según el status actual de la task_instance.
+    // Replican el flujo Telegram: empezar → en camino → en sitio →
+    // progreso → done / blocked / continuar mañana.
+    html += renderQuickActions(task);
+
     // Checklist
     if (checklist.length > 0) {
       html += `<div class="section"><div class="section-title">📋 Checklist</div>`;
@@ -797,6 +866,179 @@
       r.confirmed = !newConfirmed;
       render();
       showToast('Error al actualizar recurso');
+    }
+  };
+
+  // ─── Quick Actions (panel de acciones del ticket) ───────────────────────
+  function renderQuickActions(task) {
+    var st = task.status || 'planned';
+    var labels = {
+      planned: 'Pendiente', traveling: 'En camino', on_site: 'En el sitio',
+      in_progress: 'En progreso', done: 'Completada', blocked: 'Bloqueada',
+      continued: 'Pausada hasta mañana', canceled: 'Cancelada',
+    };
+    var pillClass = 's-' + st;
+    var pillLabel = labels[st] || st;
+    var html = `
+      <div class="quick-actions">
+        <div class="section-title">⚡ Acciones</div>
+        <div class="status-pill ${pillClass}">${esc(pillLabel)}</div>
+        <div class="actions-row">`;
+
+    // Botones contextuales por status
+    if (st === 'planned') {
+      html += `<button class="btn btn-traveling" onclick="window.qaAction('traveling')">🚗 En camino</button>`;
+      html += `<button class="btn btn-start" onclick="window.qaAction('start')">▶️ Empezar ahora</button>`;
+    }
+    if (st === 'traveling') {
+      html += `<button class="btn btn-on-site" onclick="window.qaAction('on-site')">📍 Llegué al sitio</button>`;
+      html += `<button class="btn btn-start" onclick="window.qaAction('start')">▶️ Empezar</button>`;
+    }
+    if (st === 'on_site') {
+      html += `<button class="btn btn-start" onclick="window.qaAction('start')">▶️ Empezar trabajo</button>`;
+      html += `<button class="btn btn-traveling" onclick="window.qaAction('traveling')">🚗 Volver a "en camino"</button>`;
+    }
+    if (st === 'in_progress') {
+      html += `<button class="btn btn-progress" onclick="window.qaProgress()">📊 Avance %</button>`;
+      html += `<button class="btn btn-done" onclick="window.qaAction('done')">✅ Completar</button>`;
+      html += `<button class="btn btn-blocked" onclick="window.qaBlocked()">🚫 Bloqueado</button>`;
+      html += `<button class="btn btn-continue" onclick="window.qaContinueTomorrow()">🌙 Sigo mañana</button>`;
+    }
+    if (st === 'blocked') {
+      html += `<button class="btn btn-start" onclick="window.qaAction('start')">▶️ Reintentar</button>`;
+      html += `<button class="btn btn-continue" onclick="window.qaContinueTomorrow()">🌙 Sigo mañana</button>`;
+    }
+    if (st === 'done' || st === 'continued' || st === 'canceled') {
+      html += `<button class="btn btn-skip" disabled>Sin acciones</button>`;
+      html += `<button class="btn btn-skip" disabled></button>`;
+    }
+    html += `</div>
+        <div class="actions-row" style="margin-top:8px">
+          <button class="btn btn-add-note" onclick="window.qaAddNote()">📝 Nota libre</button>
+          <button class="btn btn-add-photo" onclick="window.qaAddPhoto()">📷 Foto del ticket</button>
+        </div>
+        <input type="file" accept="image/*,.heic,.heif" capture="environment"
+               id="ticket-photo-input" style="display:none"
+               onchange="window.qaUploadPhoto(this)">
+      </div>`;
+    return html;
+  }
+
+  // Helpers de acciones rápidas — todas refrescan la página al final
+  // para reflejar el nuevo status, progreso y badges.
+  async function _qaCall(path, body) {
+    try {
+      var res = await fetch(API_BASE + '/' + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : '{}',
+      });
+      var data = await res.json();
+      if (!data.ok) {
+        showToast(data.message || data.error || 'Error');
+        return null;
+      }
+      return data;
+    } catch (err) {
+      showToast('Error de red');
+      return null;
+    }
+  }
+
+  window.qaAction = async function(actionPath) {
+    // actionPath: 'start' | 'traveling' | 'on-site' | 'done'
+    var data = await _qaCall(actionPath);
+    if (data) {
+      var msgs = {
+        'start': '▶️ Tarea iniciada',
+        'traveling': '🚗 En camino',
+        'on-site': '📍 En el sitio',
+        'done': '✅ Tarea completada',
+      };
+      showToast(msgs[actionPath] || 'Actualizado');
+      loadTask();
+    }
+  };
+
+  window.qaProgress = async function() {
+    var pct = prompt('¿Qué porcentaje de avance? (0-100)', taskData.task.progressPercent || 50);
+    if (pct === null) return;
+    var n = parseInt(pct, 10);
+    if (Number.isNaN(n) || n < 0 || n > 100) {
+      showToast('Porcentaje inválido');
+      return;
+    }
+    var note = prompt('Nota opcional (vacío para omitir):', '');
+    var data = await _qaCall('progress', { progress_percent: n, note: note || null });
+    if (data) {
+      showToast('📊 Avance ' + n + '% guardado');
+      loadTask();
+    }
+  };
+
+  window.qaBlocked = async function() {
+    var motivo = prompt('¿Cuál es el problema que te bloquea?', '');
+    if (!motivo || !motivo.trim()) return;
+    var data = await _qaCall('blocked', { note: motivo.trim() });
+    if (data) {
+      showToast('🚫 Reportado como bloqueado');
+      loadTask();
+    }
+  };
+
+  window.qaContinueTomorrow = async function() {
+    if (!confirm('¿Pausar este ticket hasta mañana?\nMañana te aparecerá nuevamente para que lo retomes.')) return;
+    var data = await _qaCall('continue-tomorrow');
+    if (data) {
+      showToast('🌙 Pausado hasta mañana');
+      // Si nos dieron un nuevo token, ofrecer abrirlo
+      if (data.tomorrow_mobile_link) {
+        if (confirm('Tu link para mañana:\n' + data.tomorrow_mobile_link + '\n\n¿Copiar al portapapeles?')) {
+          try { await navigator.clipboard.writeText(data.tomorrow_mobile_link); } catch (_) {}
+        }
+      }
+      loadTask();
+    }
+  };
+
+  window.qaAddNote = async function() {
+    var note = prompt('Escribe la nota:', '');
+    if (!note || !note.trim()) return;
+    var data = await _qaCall('note', { note: note.trim() });
+    if (data) {
+      showToast('📝 Nota guardada');
+      loadTask();
+    }
+  };
+
+  window.qaAddPhoto = function() {
+    var input = document.getElementById('ticket-photo-input');
+    if (input) {
+      input.value = '';
+      input.click();
+    }
+  };
+
+  window.qaUploadPhoto = async function(input) {
+    if (!input.files || !input.files[0]) return;
+    try {
+      var formData = new FormData();
+      formData.append('photo', input.files[0]);
+      var caption = prompt('Comentario para la foto (opcional):', '') || '';
+      if (caption) formData.append('caption', caption);
+      var res = await fetch(API_BASE + '/photo', {
+        method: 'POST',
+        body: formData,
+      });
+      var data = await res.json();
+      if (data.ok) {
+        showToast('📷 Foto subida');
+        loadTask();
+      } else {
+        showToast(data.message || data.error || 'Error al subir foto');
+      }
+    } catch (err) {
+      showToast('Error al subir foto');
     }
   };
 

@@ -189,6 +189,14 @@ Intent `TASK_SWITCH` (compuesto) está **diferido**. Medir antes (ver
   junto con los fixes del cron de supervisor. Sin esto, el cron
   `supervisorAlerts` crashea cada 15 min con
   `invalid input value for enum escalation_reason`.
+- `migrations/020_continued_status_and_mobile_ui.sql` — habilita 2
+  features: (a) status `continued` para `task_instances` (pausa multi-día,
+  distinto de `blocked` que requiere supervisor), y (b) flag
+  `requires_mobile_ui` en `app.tasks` para que el bot genere un
+  access_token al crear la instance y envíe link `/m/task/<token>` al
+  técnico — pensado para tickets externos (optel-redes NOC) donde el
+  técnico opera por móvil con botones de acción rápida. Aditiva,
+  backward-compatible (default false).
 
 Las migraciones son SQL crudo. No hay framework (como alembic, flyway). Se
 aplican manualmente con `psql -f`.
@@ -209,6 +217,42 @@ igual que una asignación de supervisor.
 | `PATCH`  | `/api/external/tasks/:task_id` | Editar / reasignar (notify opt-in) |
 | `DELETE` | `/api/external/tasks/:task_id` | Cancelar (cancela instances pendientes + notifica) |
 | `POST`   | `/api/external/tasks/:task_id/attachments` | Anexar link/foto/documento |
+| `PATCH`  | `/api/external/tasks/:task_id/status` | Forzar transición de estado (planned/traveling/on_site/in_progress/done/blocked/canceled) |
+| `POST`   | `/api/external/tasks/:task_id/notes` | Agregar nota libre al ticket sin cambiar estado |
+
+### Mobile UI para tickets externos (`requires_mobile_ui`)
+
+Si optel-redes envía `requires_mobile_ui: true` en el `POST /api/external/tasks`:
+
+1. El bot marca `app.tasks.requires_mobile_ui = true`.
+2. Al crear la `task_instance` del día, genera un `access_token` (vive 7
+   días, `TOKEN_EXPIRY_HOURS_EXTERNAL=168`).
+3. La respuesta incluye `mobile_link: "<MOBILE_BASE_URL>/m/task/<token>"`.
+4. El mensaje Telegram al técnico también incluye ese link.
+5. El técnico abre la URL y opera el ticket con botones (start, traveling,
+   on_site, progress %, done, blocked, **continue-tomorrow**, note, foto).
+
+Endpoints móviles (en `routes/mobile.js`, autenticados por token URL):
+- `POST /api/m/task/:token/start | /traveling | /on-site | /done`
+- `POST /api/m/task/:token/progress` — body `{progress_percent, note?}`
+- `POST /api/m/task/:token/blocked` — body `{note}` (motivo obligatorio)
+- `POST /api/m/task/:token/continue-tomorrow` — pausa multi-día
+- `POST /api/m/task/:token/note` — body `{note}` (nota sin cambio de estado)
+- `POST /api/m/task/:token/photo` — multipart con `photo` + `caption?`
+
+Cada endpoint dispara las MISMAS funciones de `taskService` que el flujo
+Telegram, así los reportes de productividad suman igual sin importar el
+canal.
+
+**Multi-día (`continued` status)**: cuando el técnico no termina en el día
+puede decir "termino mañana", "lo sigo mañana", "queda para mañana" en
+Telegram, o tocar 🌙 *Sigo mañana* en la UI móvil. La instance de hoy
+queda en `status='continued'` (NO `blocked` — eso es para problemas que
+requieren supervisor) y el bot crea una nueva `task_instance` para
+mañana con el mismo `task_id`. La tarea madre (`app.tasks`) sigue abierta.
+Reportes pueden filtrar:
+- `blocked` → tareas trabadas que necesitan atención
+- `continued` → trabajo legítimo extendido a otro día
 
 ### Código clave
 - Service: `backend/src/services/externalTasksService.js` (aislado del
@@ -220,8 +264,10 @@ igual que una asignación de supervisor.
 
 ### Integraciones conocidas
 - **optel-redes** (NOC/Help-Desk, mismo server Hetzner): usa un cliente
-  Python en `<repo optel-redes>/backend/app/clients/bot_tasks.py` que
-  invoca estos endpoints. Comparte `EXTERNAL_API_KEY` vía `.env`.
+  Python en `<repo optel-redes>/backend/app/services/bot_tasks_client.py`
+  que invoca estos endpoints. Comparte `EXTERNAL_API_KEY` vía `.env`.
+  Para activar la UI móvil del técnico: `create_ticket(..., enable_mobile_ui=True)`.
+  Para recuperar el link después: `get_ticket_link(task_id)`.
 
 ### Si el endpoint devuelve 503
 Significa que `EXTERNAL_API_KEY` no está configurado en el `.env` del
