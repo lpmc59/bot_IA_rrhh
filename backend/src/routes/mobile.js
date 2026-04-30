@@ -406,10 +406,9 @@ router.post('/task/:token/continue-tomorrow', validateToken, async (req, res) =>
       tomorrow_token: result.tomorrowToken || null,
       // El link de mañana es lo que vale: hoy el token actual quedará válido
       // pero la instance será 'continued' (no operable). Mañana hay que usar
-      // el nuevo token que sí apunta a la nueva instance.
-      tomorrow_mobile_link: result.tomorrowToken
-        ? `${(process.env.MOBILE_BASE_URL || '').replace(/\/+$/, '')}/m/task/${result.tomorrowToken}`
-        : null,
+      // el nuevo token que sí apunta a la nueva instance. taskService ya
+      // arma el link con la base URL correcta (interna vs externa).
+      tomorrow_mobile_link: result.tomorrowMobileLink || null,
     });
   } catch (err) {
     return _sendActionError(res, err);

@@ -848,6 +848,9 @@ async function markTaskContinuedTomorrow(instanceId, employeeId, opts = {}) {
       tomorrowInstanceId: tomorrowInstance?.instance_id || null,
       tomorrowDate: tomorrow,
       tomorrowToken,
+      // Link móvil ya armado con la base URL correcta — los call sites
+      // (messageService, routes/mobile.js) lo usan directo sin armarlo.
+      tomorrowMobileLink: buildMobileLinkForToken(tomorrowToken, !!inst.requires_mobile_ui),
       requiresMobileUi: !!inst.requires_mobile_ui,
     };
   } catch (err) {
@@ -1186,7 +1189,23 @@ async function updateStandardMinutes(instanceId, minutes) {
 const TOKEN_EXPIRY_HOURS = parseInt(process.env.TOKEN_EXPIRY_HOURS || '24');
 // Tickets externos (optel-redes) duran varios días — token más largo
 const TOKEN_EXPIRY_HOURS_EXTERNAL = parseInt(process.env.TOKEN_EXPIRY_HOURS_EXTERNAL || '168'); // 7 días
+
+// Dos dominios posibles según el origen de la tarea:
+//   MOBILE_BASE_URL          → tareas internas (bot vía dominio Talinda).
+//   MOBILE_BASE_URL_EXTERNAL → tickets con requires_mobile_ui=true (ej.
+//                              dominio del sistema externo optel-redes).
+// nginx del dominio externo debe proxy_pass /m/task/* al bot (puerto 3000).
 const MOBILE_BASE_URL = (process.env.MOBILE_BASE_URL || 'http://localhost:3000').replace(/\/+$/, '');
+const MOBILE_BASE_URL_EXTERNAL = (process.env.MOBILE_BASE_URL_EXTERNAL || MOBILE_BASE_URL).replace(/\/+$/, '');
+
+// Helper: arma /m/task/<token> usando la base URL correcta según si la
+// task madre pide UI móvil externa o no. Si requiresMobileUi es true,
+// usa MOBILE_BASE_URL_EXTERNAL; sino MOBILE_BASE_URL.
+function buildMobileLinkForToken(token, requiresMobileUi) {
+  if (!token) return null;
+  const base = requiresMobileUi ? MOBILE_BASE_URL_EXTERNAL : MOBILE_BASE_URL;
+  return `${base}/m/task/${token}`;
+}
 
 /**
  * Copia checklist items de la plantilla (task_checklist_items) a la instancia.

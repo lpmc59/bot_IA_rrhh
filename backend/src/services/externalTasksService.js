@@ -21,9 +21,20 @@ const logger = require('../utils/logger');
 const outboxService = require('./outboxService');
 
 // Base URL para construir el link móvil enviado al técnico cuando
-// requires_mobile_ui = true. Mismo valor que usa taskService.MOBILE_BASE_URL,
-// pero lo replicamos acá para no crear dependencia circular en módulo init.
-const MOBILE_BASE_URL = (process.env.MOBILE_BASE_URL || 'http://localhost:3000').replace(/\/+$/, '');
+// requires_mobile_ui = true.
+//
+// Para tickets externos (este service) preferimos MOBILE_BASE_URL_EXTERNAL,
+// que apunta al dominio del sistema externo (ej. gestion.optel-redes.com).
+// Si no está seteada, caemos a MOBILE_BASE_URL (el dominio del bot, ej.
+// gestion.talinda.es) — útil cuando ambos sistemas comparten dominio.
+//
+// nginx debe enrutar el path /m/task/<token> del dominio externo hacia
+// el backend del bot (puerto 3000). Ver DEPLOY.md.
+const MOBILE_BASE_URL = (
+  process.env.MOBILE_BASE_URL_EXTERNAL
+  || process.env.MOBILE_BASE_URL
+  || 'http://localhost:3000'
+).replace(/\/+$/, '');
 
 function buildMobileLink(token) {
   return token ? `${MOBILE_BASE_URL}/m/task/${token}` : null;

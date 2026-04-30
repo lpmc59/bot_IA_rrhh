@@ -2014,11 +2014,8 @@ async function handleTaskContinueTomorrow(employee, workDate, activeTask, messag
       `🌙 Anotado — *${title}* queda pausada hasta mañana.`,
       `Mañana te aparecerá nuevamente en tu lista para que la retomes.`,
     ];
-    if (result.tomorrowToken) {
-      const baseUrl = (process.env.MOBILE_BASE_URL || '').replace(/\/+$/, '');
-      if (baseUrl) {
-        lines.push(`\n📱 Link móvil para mañana:\n${baseUrl}/m/task/${result.tomorrowToken}`);
-      }
+    if (result.tomorrowMobileLink) {
+      lines.push(`\n📱 Link móvil para mañana:\n${result.tomorrowMobileLink}`);
     }
     return { reply: lines.join('\n'), instanceId: activeTask.instance_id };
   } catch (err) {
