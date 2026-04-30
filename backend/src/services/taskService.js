@@ -727,7 +727,12 @@ async function setTaskInstanceStatus(instanceId, newStatus, opts = {}) {
 //   - 'done' / 'canceled' / 'continued' → rechaza con TaskStatusError.
 //   - 'blocked' → rechaza (resolver bloqueo primero).
 async function markTaskContinuedTomorrow(instanceId, employeeId, opts = {}) {
-  const { messageId = null, note = null } = opts;
+  // notifyTelegram: si true (default), después del COMMIT se encola un
+  // mensaje al técnico con el link móvil de mañana, para que quede en
+  // su historial de Telegram y lo retome al día siguiente sin perder
+  // el link. El call site del flujo Telegram (handleTaskContinueTomorrow)
+  // lo desactiva porque ya responde inline con el link y duplicaría.
+  const { messageId = null, note = null, notifyTelegram = true } = opts;
 
   const client = await getClient();
   try {
@@ -848,6 +853,35 @@ async function markTaskContinuedTomorrow(instanceId, employeeId, opts = {}) {
       taskId: inst.task_id, today, tomorrow,
     });
 
+    const tomorrowMobileLink = buildMobileLinkForToken(tomorrowToken, !!inst.requires_mobile_ui);
+
+    // Encolar Telegram con el link de mañana si aplica. Fuera de la
+    // transacción para no bloquear el commit por el outbox. Los errores
+    // del outbox no rollbackean — la pausa multi-día ya está consumada.
+    if (notifyTelegram && tomorrowMobileLink) {
+      try {
+        const empRes = await query(
+          `SELECT telegram_id, phone_e164 FROM employees WHERE employee_id = $1`,
+          [employeeId]
+        );
+        const e = empRes.rows[0];
+        const target = e?.telegram_id || e?.phone_e164;
+        if (target) {
+          const title = inst.parent_title || inst.title || 'tu tarea';
+          const outboxService = require('./outboxService');
+          await outboxService.queueMessage(target,
+            `🌙 *Pausa hasta mañana*\n${title}\n\n` +
+            `📱 Mañana retomá desde acá:\n${tomorrowMobileLink}\n\n` +
+            `(El link es válido por 7 días.)`
+          );
+        }
+      } catch (err) {
+        logger.warn('markTaskContinuedTomorrow: notify telegram failed (non-fatal)', {
+          instanceId, err: err.message,
+        });
+      }
+    }
+
     return {
       yesterdayInstanceId: instanceId,
       tomorrowInstanceId: tomorrowInstance?.instance_id || null,
@@ -855,7 +889,7 @@ async function markTaskContinuedTomorrow(instanceId, employeeId, opts = {}) {
       tomorrowToken,
       // Link móvil ya armado con la base URL correcta — los call sites
       // (messageService, routes/mobile.js) lo usan directo sin armarlo.
-      tomorrowMobileLink: buildMobileLinkForToken(tomorrowToken, !!inst.requires_mobile_ui),
+      tomorrowMobileLink,
       requiresMobileUi: !!inst.requires_mobile_ui,
     };
   } catch (err) {

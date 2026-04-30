@@ -987,16 +987,12 @@
   };
 
   window.qaContinueTomorrow = async function() {
-    if (!confirm('¿Pausar este ticket hasta mañana?\nMañana te aparecerá nuevamente para que lo retomes.')) return;
+    if (!confirm('¿Pausar este ticket hasta mañana?\nVas a recibir el link nuevo por Telegram para retomarlo.')) return;
     var data = await _qaCall('continue-tomorrow');
     if (data) {
-      showToast('🌙 Pausado hasta mañana');
-      // Si nos dieron un nuevo token, ofrecer abrirlo
-      if (data.tomorrow_mobile_link) {
-        if (confirm('Tu link para mañana:\n' + data.tomorrow_mobile_link + '\n\n¿Copiar al portapapeles?')) {
-          try { await navigator.clipboard.writeText(data.tomorrow_mobile_link); } catch (_) {}
-        }
-      }
+      // El bot ya encoló un Telegram con el link de mañana, así que el
+      // técnico lo va a tener en su historial. Acá solo confirmamos.
+      showToast('🌙 Pausado hasta mañana — link enviado por Telegram');
       loadTask();
     }
   };

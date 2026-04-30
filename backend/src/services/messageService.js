@@ -2007,7 +2007,10 @@ async function handleTaskContinueTomorrow(employee, workDate, activeTask, messag
     const result = await taskService.markTaskContinuedTomorrow(
       activeTask.instance_id,
       employee.employee_id,
-      { messageId }
+      // notifyTelegram:false porque acá ya respondemos inline con el
+      // link en el mismo mensaje Telegram — sin esto el técnico
+      // recibiría dos Telegram (la respuesta inline + uno extra).
+      { messageId, notifyTelegram: false }
     );
     const title = activeTask.title || 'tu tarea';
     const lines = [
