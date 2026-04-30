@@ -733,11 +733,16 @@ async function markTaskContinuedTomorrow(instanceId, employeeId, opts = {}) {
   try {
     await client.query('BEGIN');
 
+    // FOR UPDATE OF ti — solo bloqueamos la fila de task_instances.
+    // El LEFT JOIN a tasks puede ser NULL (tareas ad-hoc sin task_id),
+    // y Postgres rechaza FOR UPDATE sobre el lado nullable de un outer
+    // join con: "FOR UPDATE cannot be applied to the nullable side of
+    // an outer join". Solo necesitamos el lock sobre la instance.
     const cur = await client.query(
       `SELECT ti.*, t.requires_mobile_ui, t.title AS parent_title
        FROM task_instances ti
        LEFT JOIN tasks t ON t.task_id = ti.task_id
-       WHERE ti.instance_id = $1 FOR UPDATE`,
+       WHERE ti.instance_id = $1 FOR UPDATE OF ti`,
       [instanceId]
     );
     if (!cur.rows[0]) {
