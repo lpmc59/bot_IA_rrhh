@@ -221,10 +221,28 @@ async function getTodayTasksForEmployee(employeeId, workDate, shiftId) {
   // del turno indicado + las ad-hoc (shift_id IS NULL).
   // Esto evita que un empleado con 2 turnos en el mismo día vea
   // tareas mezcladas de ambos turnos.
-  let sql = `SELECT ti.*, tt.title AS template_title, l.name AS location_name
+  //
+  // requires_mobile_ui + mobile_token: traemos el flag de la task madre
+  // y el token activo más reciente para esa instance, así formatTaskList
+  // puede renderizar el link 📱 directamente sin hacer un lookup extra.
+  // El LATERAL subquery solo corre para filas con requires_mobile_ui=true
+  // (el resto: planner-pruned).
+  let sql = `SELECT ti.*, tt.title AS template_title, l.name AS location_name,
+                    t.requires_mobile_ui AS requires_mobile_ui,
+                    tok.token AS mobile_token
      FROM task_instances ti
      LEFT JOIN task_templates tt ON tt.template_id = ti.template_id
      LEFT JOIN locations l ON l.location_id = ti.location_id
+     LEFT JOIN tasks t ON t.task_id = ti.task_id
+     LEFT JOIN LATERAL (
+       SELECT token
+         FROM task_instance_access_tokens
+        WHERE instance_id = ti.instance_id
+          AND revoked = false
+          AND expires_at > NOW()
+        ORDER BY created_at DESC
+        LIMIT 1
+     ) tok ON t.requires_mobile_ui = true
      WHERE ti.employee_id = $1
        AND ti.work_date = $2
        AND ti.status != 'canceled'`;
@@ -1124,6 +1142,12 @@ function formatTaskList(tasks) {
     msg += `${emoji} *${i + 1}.* ${t.title}${backlogIcon}${progress}${location}\n`;
     if (t.status === 'blocked' && t.blocked_reason) {
       msg += `   ⚠️ _Bloqueado: ${t.blocked_reason}_\n`;
+    }
+    // Si la tarea pide UI móvil y hay token vivo, mostramos el link
+    // directo bajo el título — así el técnico no tiene que scrollear
+    // su historial de Telegram para encontrar el link de ayer.
+    if (t.requires_mobile_ui && t.mobile_token) {
+      msg += `   📱 ${buildMobileLinkForToken(t.mobile_token, true)}\n`;
     }
   });
 
