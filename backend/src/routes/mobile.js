@@ -484,23 +484,35 @@ router.post('/task/:token/photo', validateToken, upload.single('photo'), async (
     const photoUrl = `/uploads/${finalFilename}`;
     const caption = (req.body?.caption || '').trim() || null;
 
-    // Insertar attachment a nivel task (no a checklist item)
+    // Insertar attachment con instance_id + task_id (madre, si existe).
+    // La migración 005 dejó instance_id como el FK correcto para
+    // attachments del trabajo del día. task_id se mantiene opcional
+    // por si el cliente quiere relacionarlo con la tarea backlog.
     const { query } = require('../config/database');
     const att = await query(
       `INSERT INTO app.attachments (
-         task_id, employee_id, file_name, file_url, content_type, file_size_bytes
-       ) VALUES ($1, $2, $3, $4, 'image/jpeg', $5)
+         instance_id, task_id, employee_id, file_name, file_url,
+         content_type, file_size_bytes
+       ) VALUES ($1, $2, $3, $4, $5, 'image/jpeg', $6)
        RETURNING attachment_id, file_url, created_at`,
-      [instance.taskId, employee.employeeId, req.file.originalname || finalFilename, photoUrl, finalSize]
+      [
+        instance.instanceId, instance.taskId, employee.employeeId,
+        req.file.originalname || finalFilename, photoUrl, finalSize,
+      ]
     );
 
-    // Log en task_updates para que aparezca en el timeline del ticket
-    await query(
-      `INSERT INTO task_updates (instance_id, employee_id, update_type, note_text)
-       VALUES ($1, $2, 'NOTE', $3)`,
-      [instance.instanceId, employee.employeeId,
-       `📷 Foto adjunta: ${photoUrl}${caption ? ` — ${caption}` : ''}`]
-    );
+    // Log en task_updates SOLO si el técnico escribió un caption.
+    // El path de la foto NO va en note_text — la foto vive en
+    // app.attachments (linkeable por instance_id) y el timeline las
+    // une por created_at. Si no hay caption, evitamos crear una fila
+    // zombi de update_type=NOTE con note_text=null.
+    if (caption) {
+      await query(
+        `INSERT INTO task_updates (instance_id, employee_id, update_type, note_text)
+         VALUES ($1, $2, 'NOTE', $3)`,
+        [instance.instanceId, employee.employeeId, caption]
+      );
+    }
     await query(
       `UPDATE task_instances SET last_update_at = NOW() WHERE instance_id = $1`,
       [instance.instanceId]
